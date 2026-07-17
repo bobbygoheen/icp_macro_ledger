@@ -1,0 +1,1249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>The ICP Macro Ledger — v2</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #12161C; }
+  * { box-sizing: border-box; }
+</style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+
+const { useState, useEffect, useRef } = React;
+
+
+// ---------- Design tokens ----------
+const C = {
+  bg: "#12161C",
+  panel: "#1A2029",
+  panelAlt: "#1F2733",
+  line: "#2C3542",
+  gold: "#C9A24B",
+  goldDim: "#8C7038",
+  ink: "#EDE9DD",
+  inkDim: "#9BA3AF",
+  inkFaint: "#5C6572",
+  red: "#C1594B",
+  green: "#7A9E7E",
+  blue: "#6F8FAE",
+};
+
+const serif = "'Iowan Old Style','Palatino Linotype',Georgia,serif";
+const mono = "'IBM Plex Mono','SF Mono',ui-monospace,Menlo,monospace";
+const sans = "'Inter','Helvetica Neue',Arial,sans-serif";
+
+// ---------- Live-data plumbing ----------
+// This build reads real data from ./data.json, which a scheduled GitHub
+// Action refreshes from the St. Louis Fed's FRED API (see scripts/ and
+// .github/workflows/). No AI calls, no API keys in the browser — the page
+// just loads a small JSON file that lives next to it, containing the
+// latest values and ~5 years of actual history per series.
+
+// How each FRED series should be formatted for display.
+// HY/IG OAS come from FRED in percent, so bp display multiplies by 100.
+const FORMATS = {
+  wti:           { fmt: (v) => `$${v.toFixed(2)}/bbl`, deltaUnit: "$", deltaDecimals: 2, period: "vs prior day" },
+  brent:         { fmt: (v) => `$${v.toFixed(2)}/bbl`, deltaUnit: "$", deltaDecimals: 2, period: "vs prior day" },
+  ust10y:        { fmt: (v) => `${v.toFixed(2)}%`, deltaBp: true, period: "vs prior day" },
+  ust2y:         { fmt: (v) => `${v.toFixed(2)}%`, deltaBp: true, period: "vs prior day" },
+  curve:         { histScale: 100, fmt: (v) => `${v >= 0 ? "+" : ""}${Math.round(v * 100)}bp`, deltaBp: true, period: "vs prior day" },
+  hyoas:         { histScale: 100, fmt: (v) => `${Math.round(v * 100)}bp`, deltaBp: true, period: "vs prior day" },
+  igoas:         { histScale: 100, fmt: (v) => `${Math.round(v * 100)}bp`, deltaBp: true, period: "vs prior day" },
+  fedfunds:      { fmt: (v) => `${(v - 0.25).toFixed(2)}–${v.toFixed(2)}%`, deltaBp: true, period: "vs prior day" },
+  cpiHeadline:   { fmt: (v) => `${v.toFixed(1)}%`, deltaPt: true, period: "vs prior month (YoY)" },
+  cpiCore:       { fmt: (v) => `${v.toFixed(1)}%`, deltaPt: true, period: "vs prior month (YoY)" },
+  pceHeadline:   { fmt: (v) => `${v.toFixed(1)}%`, deltaPt: true, period: "vs prior month (YoY)" },
+  pceCore:       { fmt: (v) => `${v.toFixed(1)}%`, deltaPt: true, period: "vs prior month (YoY)" },
+  ppi:           { fmt: (v) => `${v.toFixed(1)}%`, deltaPt: true, period: "vs prior month (YoY)" },
+  unemployment:  { fmt: (v) => `${v.toFixed(1)}%`, deltaPt: true, period: "vs prior month" },
+  payrolls:      { fmt: (v) => `${v >= 0 ? "+" : ""}${Math.round(v)}K`, deltaUnit: "K", deltaDecimals: 0, period: "vs prior month" },
+  ahe:           { fmt: (v) => `${v.toFixed(1)}%`, deltaPt: true, period: "vs prior month (YoY)" },
+  claims:        { histScale: 0.001, fmt: (v) => `${Math.round(v / 1000)}K`, deltaUnit: "K", deltaDecimals: 0, deltaScale: 0.001, period: "vs prior week" },
+  umich:         { fmt: (v) => v.toFixed(1), deltaPt: true, period: "vs prior month" },
+  saving:        { fmt: (v) => `${v.toFixed(1)}%`, deltaPt: true, period: "vs prior month" },
+  mortgage30y:   { fmt: (v) => `${v.toFixed(2)}%`, deltaBp: true, period: "vs prior week" },
+  housingStarts: { histScale: 0.001, fmt: (v) => `${(v / 1000).toFixed(2)}M`, deltaUnit: "K", deltaDecimals: 0, period: "vs prior month (SAAR)" },
+  existingHome:  { histScale: 0.000001, fmt: (v) => `${(v / 1000000).toFixed(2)}M`, deltaUnit: "", deltaDecimals: 0, period: "vs prior month (SAAR)" },
+  gdpnow:        { fmt: (v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`, deltaPt: true, period: "vs prior update" },
+  gdp:           { fmt: (v) => `${v.toFixed(1)}%`, deltaPt: true, period: "vs prior quarter (SAAR)" },
+  ismMfg:        { fmt: (v) => v.toFixed(1), deltaPt: true, period: "vs prior month" },
+  vix:           { fmt: (v) => v.toFixed(1), deltaPt: true, period: "vs prior day" },
+};
+
+function formatDelta(key, latest, prev) {
+  const f = FORMATS[key] || {};
+  const rawDiff = latest - prev;
+  let text;
+  if (f.deltaBp) {
+    const bp = Math.round(rawDiff * 100);
+    text = `${bp >= 0 ? "+" : ""}${bp}bp`;
+  } else if (f.deltaPt) {
+    text = `${rawDiff >= 0 ? "+" : ""}${rawDiff.toFixed(1)}pt`;
+  } else {
+    const scaled = rawDiff * (f.deltaScale || 1);
+    const dec = f.deltaDecimals != null ? f.deltaDecimals : 1;
+    text = `${scaled >= 0 ? "+" : ""}${scaled.toFixed(dec)}${f.deltaUnit || ""}`;
+  }
+  return `${text} ${f.period || ""}`.trim();
+}
+
+function shortDateLabel(iso) {
+  // "2024-03-01" -> "Mar '24"
+  const [y, m] = iso.split("-");
+  const names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${names[parseInt(m, 10) - 1]} '${y.slice(-2)}`;
+}
+
+function useLiveData() {
+  const [liveData, setLiveData] = useState({});
+  const [commentary, setCommentary] = useState(null);
+  const [releases, setReleases] = useState({});
+  const [themes, setThemes] = useState(null);
+  const [status, setStatus] = useState("idle"); // idle | loading | success | partial | error
+  const [asOfLive, setAsOfLive] = useState(null);
+
+  async function fetchLive() {
+    setStatus("loading");
+    try {
+      const response = await fetch(`./data.json?cb=${Date.now()}`);
+      if (!response.ok) throw new Error(`data.json fetch failed (${response.status})`);
+      const payload = await response.json();
+      const series = payload.series || {};
+      const nd = {};
+      Object.keys(series).forEach((key) => {
+        const s = series[key];
+        const f = FORMATS[key];
+        if (!f || s.latest == null || s.prev == null) return;
+        const dirEps = 1e-9;
+        nd[key] = {
+          value: f.fmt(s.latest),
+          delta: formatDelta(key, s.latest, s.prev),
+          dir: s.latest - s.prev > dirEps ? "up" : s.latest - s.prev < -dirEps ? "down" : "flat",
+          history: s.values.map((v) => v * (f.histScale || 1)),
+          historyLabels: s.dates.map(shortDateLabel), // one label per point => exact scrub dates
+          latestDate: s.latestDate,
+        };
+      });
+      if (Object.keys(nd).length === 0) throw new Error("No usable series in data.json");
+      // Non-FRED values fetched by the commentary generator (ECB, China PMI,
+      // ISM Services, retail sales, existing home sales) arrive pre-formatted.
+      const extra = payload.extraSeries || {};
+      Object.keys(extra).forEach((key) => {
+        const e = extra[key];
+        if (e && e.value && !nd[key]) {
+          nd[key] = { value: e.value, delta: e.delta || "", dir: e.dir || "flat" };
+        }
+      });
+      setLiveData(nd);
+      setCommentary(payload.commentary || null);
+      setReleases(payload.releases || {});
+      setThemes(payload.themes || null);
+      setAsOfLive(payload.updated || null);
+      setStatus(Object.keys(nd).length >= 15 ? "success" : "partial");
+    } catch (e) {
+      setStatus("error");
+    }
+  }
+
+  useEffect(() => {
+    fetchLive();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return { liveData, commentary, releases, themes, status, asOfLive, refresh: fetchLive };
+}
+
+function Pill({ children, tone = "gold" }) {
+  const map = {
+    neutral: { bg: "rgba(155,163,175,0.12)", fg: C.inkDim },
+    gold: { bg: "rgba(201,162,75,0.14)", fg: C.gold },
+    red: { bg: "rgba(193,89,75,0.14)", fg: C.red },
+    green: { bg: "rgba(122,158,126,0.14)", fg: C.green },
+    blue: { bg: "rgba(111,143,174,0.16)", fg: C.blue },
+  };
+  const s = map[tone];
+  return (
+    <span
+      style={{
+        background: s.bg,
+        color: s.fg,
+        fontFamily: mono,
+        fontSize: 10,
+        letterSpacing: 0.4,
+        padding: "3px 7px",
+        borderRadius: 3,
+        textTransform: "uppercase",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+// ---------- Chart helper functions ----------
+// Best-effort parsing so a hover/drag readout can show an approximate date
+// even for charts that only carry a start/end label rather than one label
+// per point (most of them, since exact monthly dates for 2021-2024 are
+// reconstructions anyway — see the footer disclaimer).
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function parseApproxYear(label) {
+  if (!label) return null;
+  const monthMatch = label.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/);
+  const yearMatch = label.match(/'(\d{2})\b/) || label.match(/(\d{4})/);
+  if (!yearMatch) return null;
+  const raw = yearMatch[1];
+  const year = raw.length === 2 ? 2000 + parseInt(raw, 10) : parseInt(raw, 10);
+  const monthFrac = monthMatch ? MONTHS.indexOf(monthMatch[1]) / 12 : 0;
+  return year + monthFrac;
+}
+function formatApproxDate(yearFloat) {
+  const year = Math.floor(yearFloat);
+  const monthIdx = Math.max(0, Math.min(11, Math.round((yearFloat - year) * 12)));
+  return `${MONTHS[monthIdx]} '${String(year).slice(-2)}`;
+}
+// Pulls a leading/trailing unit (like "$" or "bp" or "%") off a formatted
+// value string so interpolated chart values can be displayed consistently.
+function inferUnit(valueStr) {
+  if (!valueStr) return { prefix: "", suffix: "" };
+  const m = String(valueStr).match(/^([^\d\-]*)[\d.,\-]+([^\d]*)$/);
+  if (!m) return { prefix: "", suffix: "" };
+  return { prefix: m[1] || "", suffix: m[2] || "" };
+}
+function inferDecimals(data) {
+  let maxDec = 0;
+  data.forEach((d) => {
+    const s = String(d);
+    const dot = s.indexOf(".");
+    if (dot >= 0) maxDec = Math.max(maxDec, s.length - dot - 1);
+  });
+  return Math.min(maxDec, 2);
+}
+
+// Interactive chart: taller than before, and supports drag/hover scrubbing —
+// press and drag a finger (or mouse) across it to move a vertical guide line
+// and see the value + approximate date at that point.
+function Sparkline({ data, labels, color = C.gold, valueSample }) {
+  const [hoverIdx, setHoverIdx] = useState(null);
+  const svgRef = useRef(null);
+  const draggingRef = useRef(false);
+
+  if (!data || data.length < 2) return null;
+
+  const w = 300;
+  const h = 96;
+  const padY = 10;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const stepX = w / (data.length - 1);
+  const points = data.map((d, i) => {
+    const x = i * stepX;
+    const y = h - padY - ((d - min) / range) * (h - padY * 2);
+    return [x, y];
+  });
+  const linePath = points.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
+  const areaPath = linePath + ` L ${w},${h} L 0,${h} Z`;
+
+  const decimals = inferDecimals(data);
+  const { prefix, suffix } = inferUnit(valueSample);
+  const exactLabels = labels && labels.length === data.length;
+
+  function labelForIndex(i) {
+    if (!labels) return "";
+    if (exactLabels) return labels[i];
+    const y0 = parseApproxYear(labels[0]);
+    const y1 = parseApproxYear(labels[labels.length - 1]);
+    if (y0 == null || y1 == null) return "";
+    const frac = data.length === 1 ? 0 : i / (data.length - 1);
+    return formatApproxDate(y0 + (y1 - y0) * frac);
+  }
+
+  function handleMove(clientX) {
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const relX = ((clientX - rect.left) / rect.width) * w;
+    let idx = Math.round(relX / stepX);
+    idx = Math.max(0, Math.min(data.length - 1, idx));
+    setHoverIdx(idx);
+  }
+
+  const activeIdx = hoverIdx != null ? hoverIdx : data.length - 1;
+  const activePoint = points[activeIdx];
+  const activeValue = data[activeIdx];
+
+  return (
+    <div style={{ marginTop: 14, marginBottom: 4 }}>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${w} ${h}`}
+        preserveAspectRatio="none"
+        style={{ width: "100%", height: h, display: "block", touchAction: "none", cursor: "crosshair" }}
+        onPointerDown={(e) => {
+          draggingRef.current = true;
+          try {
+            e.currentTarget.setPointerCapture(e.pointerId);
+          } catch (err) {}
+          handleMove(e.clientX);
+        }}
+        onPointerMove={(e) => {
+          if (e.pointerType === "touch" ? draggingRef.current : true) handleMove(e.clientX);
+        }}
+        onPointerUp={() => {
+          draggingRef.current = false;
+          setHoverIdx(null);
+        }}
+        onPointerLeave={() => {
+          draggingRef.current = false;
+          setHoverIdx(null);
+        }}
+      >
+        <path d={areaPath} fill={color} fillOpacity={0.12} stroke="none" />
+        <path d={linePath} fill="none" stroke={color} strokeWidth={1.75} />
+        {hoverIdx != null && (
+          <line
+            x1={activePoint[0]}
+            x2={activePoint[0]}
+            y1={0}
+            y2={h}
+            stroke={C.inkDim}
+            strokeWidth={1}
+            strokeDasharray="3,3"
+          />
+        )}
+        <circle cx={activePoint[0]} cy={activePoint[1]} r={hoverIdx != null ? 3.4 : 2.6} fill={color} />
+      </svg>
+      {labels && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontFamily: mono, fontSize: 9.5, color: C.inkFaint, marginTop: 4 }}>
+          <span>{labelForIndex(0)}</span>
+          <span style={{ color: hoverIdx != null ? C.ink : C.inkFaint, fontSize: hoverIdx != null ? 11 : 9.5, fontWeight: hoverIdx != null ? 600 : 400 }}>
+            {hoverIdx != null
+              ? `${labelForIndex(activeIdx)} — ${prefix}${activeValue.toFixed(decimals)}${suffix}`
+              : "Press & drag to explore"}
+          </span>
+          <span>{labelForIndex(data.length - 1)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MetricCard({ m, live }) {
+  const liveEntry = m.liveKey ? live.liveData[m.liveKey] : null;
+  const value = liveEntry?.value || m.value;
+  const delta = liveEntry?.delta || m.delta;
+  const dir = liveEntry?.dir || m.dir;
+  const isLive = !!liveEntry || !!(m.themeKey && live.themes?.[m.themeKey]);
+  const nextDate = (m.releaseKey && live.releases?.[m.releaseKey]) || m.nextDate;
+  const prior = (m.themeKey && live.themes?.[m.themeKey]) || m.prior;
+
+  const dirColor = dir === "up" ? m.upColor || C.red : dir === "down" ? m.downColor || C.green : C.inkFaint;
+  const glyph = dir === "up" ? "▲" : dir === "down" ? "▼" : "▬";
+
+  // When live data is present, its full real FRED history (with exact dates)
+  // replaces the baked-in reconstructed series entirely.
+  const history = liveEntry?.history || m.history || null;
+  const historyLabels = liveEntry?.historyLabels || m.historyLabels || null;
+
+  return (
+    <div
+      style={{
+        background: C.panel,
+        border: `1px solid ${isLive ? C.goldDim : C.line}`,
+        borderRadius: 6,
+        padding: "15px 17px",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+            <div
+              style={{
+                fontFamily: sans,
+                fontSize: 10.5,
+                letterSpacing: 0.6,
+                textTransform: "uppercase",
+                color: C.inkFaint,
+              }}
+            >
+              {m.label}
+            </div>
+            {isLive && <Pill tone="blue">Live</Pill>}
+          </div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontFamily: mono, fontSize: 24, color: C.ink, fontWeight: 500 }}>{value}</span>
+            <span style={{ fontFamily: mono, fontSize: 11.5, color: dirColor }}>
+              {glyph} {delta}
+            </span>
+          </div>
+          <div style={{ fontFamily: sans, fontSize: 11.5, color: C.inkDim, marginTop: 4, lineHeight: 1.4 }}>
+            {prior}
+          </div>
+        </div>
+        <Pill tone="gold">Next: {nextDate}</Pill>
+      </div>
+
+      {history && (
+        <Sparkline
+          data={history}
+          labels={historyLabels}
+          color={dirColor === C.inkFaint ? C.gold : dirColor}
+          valueSample={value}
+        />
+      )}
+
+      <div
+        style={{
+          marginTop: 11,
+          paddingTop: 11,
+          borderTop: `1px solid ${C.line}`,
+          fontFamily: sans,
+          fontSize: 12.25,
+          lineHeight: 1.55,
+          color: C.ink,
+        }}
+      >
+        <span style={{ color: C.gold, fontFamily: mono, fontSize: 10, letterSpacing: 0.5 }}>WHY IT MATTERS — </span>
+        <span style={{ color: C.inkDim }}>{m.relevance}</span>
+      </div>
+    </div>
+  );
+}
+
+function SectionHeader({ title, note }) {
+  return (
+    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "36px 0 14px", flexWrap: "wrap", gap: 6 }}>
+      <h2 style={{ fontFamily: serif, fontSize: 19, color: C.ink, margin: 0, fontWeight: 500, letterSpacing: 0.2 }}>{title}</h2>
+      {note && <span style={{ fontFamily: sans, fontSize: 11.5, color: C.inkFaint, fontStyle: "italic" }}>{note}</span>}
+    </div>
+  );
+}
+
+function CreditGauge({ live }) {
+  const min = 250, max = 900;
+  const liveEntry = live.liveData.hyoas;
+  const current = liveEntry ? parseFloat(String(liveEntry.value).replace(/[^0-9.]/g, "")) : 269;
+  const pct = Math.min(100, Math.max(0, ((current - min) / (max - min)) * 100));
+  // Percentile of current spread within its own ~5y history (live data only)
+  let pctile = null;
+  if (liveEntry?.history && liveEntry.history.length >= 10) {
+    const below = liveEntry.history.filter((v) => v < current).length;
+    pctile = Math.round((100 * below) / liveEntry.history.length);
+  }
+  return (
+    <div style={{ background: C.panelAlt, border: `1px solid ${C.line}`, borderRadius: 6, padding: "20px 22px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 6 }}>
+        <div style={{ fontFamily: sans, fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", color: C.inkFaint }}>
+          Credit Cycle Gauge — HY OAS (ICE BofA)
+        </div>
+        <div style={{ fontFamily: mono, fontSize: 20, color: C.gold }}>{current}bp</div>
+      </div>
+      <div
+        style={{
+          position: "relative",
+          height: 8,
+          borderRadius: 4,
+          marginTop: 16,
+          marginBottom: 8,
+          background: `linear-gradient(90deg, ${C.green} 0%, ${C.gold} 45%, ${C.red} 100%)`,
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            left: `calc(${pct}% - 6px)`,
+            top: -5,
+            width: 12,
+            height: 18,
+            background: C.ink,
+            borderRadius: 2,
+            boxShadow: "0 0 0 2px #12161C",
+          }}
+        />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontFamily: sans, fontSize: 10.5, color: C.inkFaint, flexWrap: "wrap", gap: 4 }}>
+        <span>Tight / late-cycle complacent (&lt;300bp)</span>
+        <span>Historical avg (~450bp)</span>
+        <span>Recessionary / distressed (&gt;800bp)</span>
+      </div>
+      <div style={{ marginTop: 14, fontFamily: sans, fontSize: 12.5, color: C.inkDim, lineHeight: 1.55 }}>
+        {pctile != null && (
+          <span style={{ color: C.ink }}>
+            At {current}bp, HY spreads are currently tighter than {100 - pctile}% of readings over the past five
+            years.{" "}
+          </span>
+        )}
+        Tight spreads alongside softening macro data are worth watching for special situations sourcing:
+        historically, that combination has preceded episodes where dispersion widens well before the index does —
+        idiosyncratic credit stress shows up in specific issuers (leveraged, tariff-exposed, or refinancing in
+        2026–27) long before the benchmark OAS moves. That dispersion is where situational/special-sits credit
+        opportunities tend to originate.
+      </div>
+    </div>
+  );
+}
+
+function LiveStatusBar({ live }) {
+  const { status, asOfLive, refresh } = live;
+  const label =
+    status === "loading"
+      ? "Loading data…"
+      : status === "success"
+      ? `Data last refreshed from FRED: ${asOfLive || "recently"}`
+      : status === "partial"
+      ? `Data last refreshed from FRED: ${asOfLive || "recently"} (a few series unavailable; reviewed snapshot shown for those)`
+      : status === "error"
+      ? "Couldn't load data.json — showing the reviewed snapshot. Check that the data-refresh workflow has run."
+      : "Loading data…";
+  const tone = status === "success" ? C.green : status === "partial" ? C.gold : C.inkDim;
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 12,
+        marginTop: 18,
+        padding: "10px 14px",
+        background: C.panel,
+        border: `1px solid ${C.line}`,
+        borderRadius: 6,
+        flexWrap: "wrap",
+      }}
+    >
+      <span style={{ fontFamily: mono, fontSize: 11, color: tone }}>{label}</span>
+      <button
+        onClick={refresh}
+        disabled={status === "loading"}
+        style={{
+          fontFamily: mono,
+          fontSize: 10.5,
+          letterSpacing: 0.5,
+          textTransform: "uppercase",
+          color: C.gold,
+          background: "rgba(201,162,75,0.12)",
+          border: `1px solid ${C.goldDim}`,
+          borderRadius: 4,
+          padding: "6px 12px",
+          cursor: status === "loading" ? "default" : "pointer",
+          opacity: status === "loading" ? 0.6 : 1,
+        }}
+      >
+        {status === "loading" ? "Refreshing…" : "Refresh Data"}
+      </button>
+    </div>
+  );
+}
+
+function Takeaways({ live }) {
+  const fallbackItems = [
+    {
+      tag: "Energy",
+      text:
+        "WTI has rallied back to ~$80/bbl and Brent to ~$85/bbl, reversing roughly a third of the Q2 decline that followed the interim Iran ceasefire, after renewed U.S. strikes and a reinstated blockade near the Strait of Hormuz. This is the single biggest swing factor behind this year's inflation volatility and directly threatens the 'inflation is cooling' narrative the June CPI print suggested.",
+    },
+    {
+      tag: "Labor",
+      text:
+        "June payrolls added just +57K (vs. 115K consensus) with -74K in combined revisions to April/May, and the drop in unemployment to 4.2% was driven by workers leaving the labor force, not new hiring. This is the clearest crack yet in a labor market that had looked resilient all year — a genuine deceleration signal for demand at the businesses you underwrite.",
+    },
+    {
+      tag: "Inflation",
+      text:
+        "Headline CPI fell to 3.5% YoY in June, but that's almost entirely a gasoline-price reversal from the brief Iran ceasefire — pump prices have since risen again as oil has rallied. Core CPI (2.6%) and core PPI (+5.1% YoY) both point to sticky underlying inflation. Don't read the headline drop as the Fed's inflation problem being solved.",
+    },
+    {
+      tag: "Policy",
+      text:
+        "The Fed held at 3.50–3.75% in June under new Chair Kevin Warsh, stripped out easing language entirely, and the dot plot showed 9 of 19 officials expecting a hike by year-end. Markets price ~50% odds of a September hike. Base case for July 29 is another hold, but the multi-month direction of travel has flipped from cuts to a live hike risk — repricing your cost-of-capital assumptions is warranted.",
+    },
+    {
+      tag: "Credit",
+      text:
+        "HY and IG spreads are both sitting near cycle tights even as growth and labor data soften — a classic late-cycle setup where index-level calm can mask building dispersion in specific credits (tariff-exposed, rate-exposed, or refinancing into 2026–27).",
+    },
+    {
+      tag: "Growth",
+      text:
+        "Q1 GDP was finalized at 2.1% (revised up from 1.6%), and the Q2 advance estimate lands July 30 — one day after the FOMC decision, making the back half of that week a genuine swing moment for rates and credit pricing simultaneously.",
+    },
+    {
+      tag: "Consumer & Housing",
+      text:
+        "UMich sentiment remains near record lows despite a bounce, existing home sales fell 2.4% in June against a ~6.5% mortgage rate, and consumer resilience — a key support for growth-oriented underwriting — is now the most fragile pillar in the data.",
+    },
+  ];
+  const liveItems = live?.commentary?.items;
+  const items = liveItems && liveItems.length > 0 ? liveItems : fallbackItems;
+  const sourceNote =
+    live?.commentary?.source === "claude"
+      ? `Generated ${live.commentary.generated} from the latest data and news`
+      : live?.commentary?.source === "rules"
+      ? `Computed ${live.commentary.generated} from the latest data`
+      : "Reviewed editorial snapshot";
+  return (
+    <div style={{ background: C.panelAlt, border: `1px solid ${C.line}`, borderRadius: 6, padding: "22px 24px", marginTop: 24 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+        <div style={{ fontFamily: sans, fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", color: C.inkFaint }}>
+          This Week's Read — What Actually Matters
+        </div>
+        <div style={{ fontFamily: mono, fontSize: 9.5, color: C.inkFaint }}>{sourceNote}</div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {items.map((it) => (
+          <div key={it.tag} style={{ display: "flex", gap: 14 }}>
+            <div style={{ minWidth: 108, flexShrink: 0 }}>
+              <span style={{ fontFamily: mono, fontSize: 10.5, color: C.gold, letterSpacing: 0.5, textTransform: "uppercase" }}>{it.tag}</span>
+            </div>
+            <div style={{ fontFamily: sans, fontSize: 13, lineHeight: 1.55, color: C.ink }}>{it.text}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const sections = [
+  {
+    title: "Energy & Commodities",
+    note: "The swing factor behind this year's inflation, Fed policy, and portfolio-company input costs",
+    metrics: [
+      {
+        label: "WTI Crude Oil",
+        liveKey: "wti",
+        value: "$80.44/bbl",
+        delta: "+3.1% (1d)",
+        dir: "up",
+        prior: "52-week range: $54.97 (Dec '25 low) to $119.47 (Mar '26 high, Iran-conflict spike)",
+        nextDate: "Daily",
+        upColor: C.red,
+        downColor: C.green,
+        history: [48, 66, 87, 110, 78, 76, 72, 82, 68, 55, 119, 80],
+        historyLabels: ["2021", "Jul '26"],
+        relevance:
+          "The most direct input into energy CPI/PPI and, by extension, Fed policy — June's entire inflation 'improvement' traced back to a gasoline-price reversal that is now unwinding as oil rallies again on renewed Iran conflict escalation. For special situations sourcing, sustained oil above $80 raises input costs for transport-, logistics-, and manufacturing-exposed borrowers and is a direct margin risk in any credit model assuming energy costs stay near Q2 lows.",
+      },
+      {
+        label: "Brent Crude Oil",
+        liveKey: "brent",
+        value: "$84.64/bbl",
+        delta: "-$1.28 (1d)",
+        dir: "down",
+        prior: "52-week range: $58.66 (Dec '25 low) to $120.88 (Apr '26 high); ~$15/bbl above year-ago levels",
+        nextDate: "Daily",
+        upColor: C.red,
+        downColor: C.green,
+        history: [51, 70, 91, 112, 82, 79, 76, 87, 74, 59, 121, 84.6],
+        historyLabels: ["2021", "Jul '26"],
+        relevance:
+          "The global benchmark — matters most for any portfolio company with international supply chains or European/Asian input costs. The gap between the recent low (~$68 in June, post-ceasefire) and today's ~$85 is a real, fast-moving swing in landed costs for import-exposed manufacturing and distribution issuers.",
+      },
+    ],
+  },
+  {
+    title: "Central Banks & Rates",
+    note: "Sets the cost of capital for every deal you underwrite",
+    metrics: [
+      {
+        label: "Fed Funds Target Range",
+        releaseKey: "fomc",
+        liveKey: "fedfunds",
+        value: "3.50–3.75%",
+        delta: "held",
+        dir: "flat",
+        prior: "Unchanged since June 17 meeting; hawkish tilt under new Chair Warsh, easing bias removed",
+        nextDate: "Jul 29",
+        history: [0.25, 0.25, 2.50, 4.50, 5.50, 5.50, 4.50, 4.00, 3.75, 3.75],
+        historyLabels: ["2021", "Jul '26"],
+        relevance:
+          "Directly sets your floating-rate cost of capital and discount rate on cash flows across the portfolio. The June dot plot showed 9 of 19 officials expecting a hike by year-end — a real risk that base rates move against you mid-underwriting on new originations. Price floating-rate structures to a higher-for-longer scenario, not the cutting cycle markets expected six months ago.",
+      },
+      {
+        label: "10Y Treasury Yield",
+        liveKey: "ust10y",
+        value: "4.58%",
+        delta: "+13bp (1mo)",
+        dir: "up",
+        prior: "Two-month high of 4.62% touched July 14; retreated slightly after the soft June CPI print",
+        nextDate: "Daily",
+        history: [1.1, 1.8, 2.9, 3.5, 3.9, 4.0, 4.6, 4.4, 4.4, 4.58],
+        historyLabels: ["2021", "Jul '26"],
+        relevance:
+          "The long-duration discount rate for enterprise valuations and refinancing math. Rising 10Y alongside sticky core inflation compresses multiples on growth-oriented credits and raises the bar for unitranche/first-lien pricing on new originations.",
+      },
+      {
+        label: "2Y Treasury Yield",
+        liveKey: "ust2y",
+        value: "4.14%",
+        delta: "-14bp (1d on CPI)",
+        dir: "down",
+        prior: "Most rate-sensitive tenor; single largest one-day drop since February on the June CPI miss",
+        nextDate: "Daily",
+        upColor: C.red,
+        downColor: C.green,
+        history: [0.13, 0.78, 2.90, 4.20, 4.90, 4.30, 4.20, 4.20, 4.28, 4.14],
+        historyLabels: ["2021", "Jul '26"],
+        relevance:
+          "The cleanest read on near-term Fed expectations. Swings here are your fastest signal of the market repricing hike/cut odds — watch it around every CPI, PCE, and jobs print for how much the front end is moving relative to the long end.",
+      },
+      {
+        label: "Yield Curve Slope (10Y minus 2Y)",
+        liveKey: "curve",
+        value: "+44bp",
+        delta: "positive / normal shape",
+        dir: "flat",
+        prior: "Curve has been back to its normal upward slope since 2025; a positive slope generally means no imminent recession is priced in",
+        nextDate: "Daily",
+        upColor: C.green,
+        downColor: C.red,
+        history: [0.80, 0.50, -0.30, -0.70, -1.00, -0.30, 0.30, 0.35, 0.34, 0.44],
+        historyLabels: ["2021", "Jul '26"],
+        relevance:
+          "A positively sloped curve (long-term rates above short-term rates, the normal shape) is generally constructive for credit — it isn't pricing imminent recession, and it widens the margin banks and direct lenders earn borrowing short and lending long, supporting private credit liquidity and refi markets you rely on for exits. An inverted curve (short rates above long rates) is one of the more reliable historical recession warnings.",
+      },
+      {
+        label: "ECB Deposit Rate",
+        liveKey: "ecb",
+        releaseKey: "ecb",
+        value: "2.25%",
+        delta: "+25bp",
+        dir: "up",
+        prior: "Hiked June 11 on Middle East-driven energy inflation (2026 inflation forecast raised to 3.0%); next decision Jul 23",
+        nextDate: "Jul 23",
+        history: [-0.50, -0.50, 0.00, 2.50, 3.75, 4.00, 3.50, 2.75, 2.00, 2.25],
+        historyLabels: ["2021", "Jul '26"],
+        relevance:
+          "A hiking ECB alongside a possibly-hiking Fed removes the rate-divergence trade that's supported USD strength — relevant if portfolio companies carry European supply chains, input costs, or euro-denominated debt.",
+      },
+    ],
+  },
+  {
+    title: "Inflation",
+    note: "Drives the Fed's next move and your real cost of debt",
+    metrics: [
+      {
+        label: "Headline CPI (YoY)",
+        releaseKey: "cpi",
+        liveKey: "cpiHeadline",
+        value: "3.5%",
+        delta: "-0.7pt",
+        dir: "down",
+        prior: "May 4.2% → June 3.5%; -0.4% m/m, largest monthly drop since Apr 2020",
+        nextDate: "Aug 12",
+        upColor: C.red,
+        downColor: C.green,
+        history: [1.4, 7.5, 9.1, 6.4, 3.2, 3.1, 2.9, 2.9, 2.9, 3.3, 3.8, 4.2, 3.5],
+        historyLabels: ["2021", "Jun '26"],
+        relevance:
+          "The June drop is mostly a gasoline-price reversal from the brief Iran ceasefire, not a durable disinflation trend — pump prices have since risen again on renewed Middle East tension. Don't read this as a green light for Fed cuts; underwrite to sticky, not falling, financing costs.",
+      },
+      {
+        label: "Core CPI (YoY)",
+        releaseKey: "cpi",
+        liveKey: "cpiCore",
+        value: "2.6%",
+        delta: "-0.3pt",
+        dir: "down",
+        prior: "Flat m/m in June vs. consensus +0.2%; still well above the 2% target",
+        nextDate: "Aug 12",
+        upColor: C.red,
+        downColor: C.green,
+        history: [1.6, 6.0, 5.9, 5.6, 4.0, 3.4, 3.2, 3.0, 2.5, 2.6, 2.8, 2.9, 2.6],
+        historyLabels: ["2021", "Jun '26"],
+        relevance:
+          "The number the Fed and rates desks actually trade off. Shelter and services inflation remain structurally sticky — the driver most relevant to labor-intensive B2B services issuers where wage cost pass-through is central to your underwriting case.",
+      },
+      {
+        label: "Core PCE (YoY)",
+        releaseKey: "pce",
+        liveKey: "pceCore",
+        value: "3.4%",
+        delta: "highest since Oct '23",
+        dir: "up",
+        prior: "May reading; +0.3% m/m, in line with consensus. This is the Fed's actual target metric, not CPI",
+        nextDate: "Jul 30",
+        upColor: C.red,
+        downColor: C.green,
+        history: [1.5, 5.2, 5.0, 4.7, 3.8, 2.9, 2.8, 2.8, 2.9, 3.0, 3.2, 3.4],
+        historyLabels: ["2021", "May '26"],
+        relevance:
+          "This is the number that matters most for the FOMC's 2% target and lands the same day as the Q2 GDP advance estimate — the single most important data morning of the cycle so far. A core PCE print that fails to decelerate materially raises the odds of the hike the June dot plot flagged.",
+      },
+      {
+        label: "Headline PCE (YoY)",
+        releaseKey: "pce",
+        liveKey: "pceHeadline",
+        value: "4.1%",
+        delta: "highest since Apr '23",
+        dir: "up",
+        prior: "+0.4% m/m in May, in line with consensus",
+        nextDate: "Jul 30",
+        upColor: C.red,
+        downColor: C.green,
+        history: [1.4, 6.0, 7.0, 5.3, 3.3, 2.6, 2.5, 2.5, 2.5, 3.4, 3.8, 4.1],
+        historyLabels: ["2021", "May '26"],
+        relevance:
+          "Confirms the CPI story from the Fed's preferred lens — headline inflation has been accelerating for three straight months on the energy shock. Watch whether June's gasoline reversal shows up here the way it did in CPI.",
+      },
+      {
+        label: "PPI (Final Demand, YoY)",
+        releaseKey: "ppi",
+        liveKey: "ppi",
+        value: "5.5%",
+        delta: "core PPI 5.1%",
+        dir: "up",
+        prior: "-0.3% m/m in June, but entirely energy-driven (-6.4%); core goods/services still firm",
+        nextDate: "Aug 13",
+        upColor: C.red,
+        downColor: C.green,
+        history: [1.7, 9.8, 7.4, 5.7, 1.0, 0.9, 1.8, 2.3, 3.3, 4.0, 5.0, 5.8, 5.5],
+        historyLabels: ["2021", "Jun '26"],
+        relevance:
+          "PPI is the earliest read on the inflation pipeline — it tells you what's coming at portfolio companies' input costs before it shows up in their P&Ls. Core PPI holding near +5% YoY despite headline relief is a margin-compression risk for issuers with limited pricing power.",
+      },
+    ],
+  },
+  {
+    title: "Labor Market",
+    note: "Signals demand durability for the businesses you're financing",
+    metrics: [
+      {
+        label: "Nonfarm Payrolls",
+        releaseKey: "jobs",
+        liveKey: "payrolls",
+        value: "+57K",
+        delta: "-72K vs. consensus",
+        dir: "down",
+        prior: "May revised down to +129K; Apr/May revised down a combined -74K",
+        nextDate: "Aug 7",
+        upColor: C.green,
+        downColor: C.red,
+        history: [562, 399, 255, 166, 120, 57],
+        historyLabels: ["2021 avg", "Jun '26"],
+        relevance:
+          "A sharp deceleration plus large downward revisions is the clearest sign yet that hiring momentum has genuinely stalled, not just normalized. This is a leading indicator on demand for growth-oriented borrowers across the portfolio — weakening payroll growth typically precedes softer topline growth and covenant headroom compression at the credits you're underwriting.",
+      },
+      {
+        label: "Unemployment Rate",
+        releaseKey: "jobs",
+        liveKey: "unemployment",
+        value: "4.2%",
+        delta: "-0.1pt",
+        dir: "down",
+        prior: "Dipped on falling labor force participation (61.5%, lowest since Mar 2021), not stronger hiring",
+        nextDate: "Aug 7",
+        upColor: C.red,
+        downColor: C.green,
+        history: [6.3, 4.0, 3.4, 3.7, 4.0, 4.3, 4.3, 4.3, 4.2],
+        historyLabels: ["2021", "Jun '26"],
+        relevance:
+          "The headline improvement is misleading — it reflects people leaving the labor force, not new jobs. A 'good' unemployment print built on shrinking participation doesn't ease the Fed's inflation concerns, so don't expect it to accelerate rate cuts.",
+      },
+      {
+        label: "Avg Hourly Earnings (YoY)",
+        releaseKey: "jobs",
+        liveKey: "ahe",
+        value: "3.5%",
+        delta: "+0.1pt",
+        dir: "up",
+        prior: "$37.64/hr, +0.3% m/m in June",
+        nextDate: "Aug 7",
+        upColor: C.red,
+        downColor: C.green,
+        history: [5.1, 5.7, 4.4, 4.5, 4.0, 3.3, 3.4, 3.4, 3.5],
+        historyLabels: ["2021", "Jun '26"],
+        relevance:
+          "Wage growth still running above pre-pandemic norms keeps services inflation sticky and matters directly for portfolio companies in services and light manufacturing where labor is the largest variable cost line.",
+      },
+      {
+        label: "Initial Jobless Claims",
+        liveKey: "claims",
+        value: "215K",
+        delta: "-2K (w/w)",
+        dir: "down",
+        prior: "Week of July 4; continuing claims rose to 1,814K, highest since late March",
+        nextDate: "Weekly (Thu)",
+        upColor: C.red,
+        downColor: C.green,
+        history: [900, 230, 190, 210, 220, 227, 215, 217, 215],
+        historyLabels: ["2021", "Jul 4 '26"],
+        relevance:
+          "The highest-frequency labor read available — useful for spotting inflection points between the monthly NFP prints. Low initial claims alongside rising continuing claims (1.81M) is the 'low firing, low hiring' pattern: workers aren't being laid off, but the unemployed are taking longer to find new jobs, a subtle early-warning sign for consumer-facing portfolio companies.",
+      },
+    ],
+  },
+  {
+    title: "Consumer",
+    note: "The demand engine behind growth-oriented borrowers",
+    metrics: [
+      {
+        label: "U. Michigan Consumer Sentiment",
+        releaseKey: "umich",
+        liveKey: "umich",
+        value: "49.5",
+        delta: "+4.7pt",
+        dir: "up",
+        prior: "June final, up from May's all-time record low of 44.8; still ~13% below pre-Iran-conflict February level",
+        nextDate: "Jul 18 (prelim)",
+        upColor: C.green,
+        downColor: C.red,
+        history: [79, 67, 50, 65, 79, 71, 57, 54, 49, 46, 44.8, 49.5],
+        historyLabels: ["2021", "Jun '26"],
+        relevance:
+          "Despite the bounce, sentiment remains near the lowest levels on record for this survey (since 1978), with year-ahead inflation expectations still elevated at 4.6%. For consumer-facing borrowers in the portfolio, this is a caution flag on discretionary demand even as hard spending data holds up better than sentiment implies.",
+      },
+      {
+        label: "Retail Sales (ex-auto, ex-gas, m/m)",
+        liveKey: "retailSales",
+        releaseKey: "retail",
+        value: "~flat",
+        delta: "June print",
+        dir: "flat",
+        prior: "May: retail sales +0.9% m/m, +6.9% YoY; June consensus was -0.2% headline as gasoline comps faded. Chart shows annual YoY growth, not the monthly figure, for a readable 5-year trend",
+        nextDate: "Aug 14",
+        history: [18, 9, 3, 3, 4, 6.9],
+        historyLabels: ["2021 YoY", "May '26 YoY"],
+        relevance:
+          "Retail sales feed directly into GDP's consumer spending component and are the most current read on whether the resilient-consumer narrative is cracking. A miss here alongside the June payrolls miss would meaningfully raise the odds markets price in a September Fed cut instead of a hike.",
+      },
+      {
+        label: "Personal Saving Rate",
+        releaseKey: "pce",
+        liveKey: "saving",
+        value: "3.0%",
+        delta: "low vs. history",
+        dir: "flat",
+        prior: "May reading; PCE spending +0.7% m/m outpacing income gains in several recent months",
+        nextDate: "Jul 30",
+        upColor: C.green,
+        downColor: C.red,
+        history: [19.0, 7.0, 4.5, 4.0, 3.5, 3.4, 3.3, 3.1, 3.0, 3.0],
+        historyLabels: ["2021", "May '26"],
+        relevance:
+          "A saving rate this low means consumer spending is running ahead of income growth — durable as long as labor income holds, but a fast-draining buffer if payroll growth keeps decelerating the way June's report suggested. Worth tracking alongside NFP for a read on how much runway growth-oriented consumer-facing issuers actually have.",
+      },
+    ],
+  },
+  {
+    title: "Housing",
+    note: "A read on rate sensitivity, wealth effects, and lending activity",
+    metrics: [
+      {
+        label: "Existing Home Sales",
+        releaseKey: "existing",
+        liveKey: "existingHome",
+        value: "4.09M",
+        delta: "-2.4% m/m",
+        dir: "down",
+        prior: "June SAAR; reversed a five-month high reached in May; median price hit a record $440,600",
+        nextDate: "Aug 11",
+        upColor: C.green,
+        downColor: C.red,
+        history: [6.1, 6.4, 4.0, 4.1, 4.0, 4.09],
+        historyLabels: ["2021", "Jun '26"],
+        relevance:
+          "Housing turnover drives spending at home-services, furnishings, and building-materials businesses — directly relevant to any portfolio exposure to housing-cycle-sensitive issuers. Sales are back-and-forth month to month, tracking mortgage-rate volatility more than any secular trend.",
+      },
+      {
+        label: "30Y Mortgage Rate",
+        liveKey: "mortgage30y",
+        value: "6.49%",
+        delta: "-33bp YoY",
+        dir: "down",
+        prior: "Freddie Mac average, early July; still ~45bp higher than pre-Iran-conflict levels per Reuters",
+        nextDate: "Weekly (Thu)",
+        upColor: C.red,
+        downColor: C.green,
+        history: [3.1, 3.5, 6.4, 6.8, 6.7, 7.0, 6.70, 6.72, 6.60, 6.49],
+        historyLabels: ["2021", "Jun '26"],
+        relevance:
+          "A direct proxy for where consumer and small-business borrowing costs sit outside of Fed-driven short rates. Fannie Mae/MBA both project rates holding in the mid-6% range through 2027 — a headwind for any underwriting case banking on cheaper financing arriving soon.",
+      },
+      {
+        label: "Housing Starts",
+        releaseKey: "housing",
+        liveKey: "housingStarts",
+        value: "1.18M",
+        delta: "-15.4% m/m",
+        dir: "down",
+        prior: "May SAAR (1,177K), down from April's revised 1,392K and -8.7% YoY; building permits also softened to 1,413K (-0.7% m/m)",
+        nextDate: "Jul 17",
+        upColor: C.green,
+        downColor: C.red,
+        history: [1.60, 1.35, 1.42, 1.36, 1.30, 1.39, 1.18],
+        historyLabels: ["2021", "May '26"],
+        relevance:
+          "A leading indicator the FOMC will have in hand one data cycle before its policy decisions, and a direct read on construction and building-materials issuers in the portfolio. The sharp May drop, against a still-elevated ~6.5% mortgage rate, is a concrete sign the housing sector is decelerating faster than the headline consumer data suggests.",
+      },
+    ],
+  },
+  {
+    title: "Manufacturing & Business Activity",
+    note: "Direct signal for growth-oriented industrial and services issuers",
+    metrics: [
+      {
+        label: "ISM Manufacturing PMI",
+        releaseKey: "ismMfg",
+        liveKey: "ismMfg",
+        value: "53.3",
+        delta: "-0.7pt",
+        dir: "down",
+        prior: "6th straight month of expansion; new orders 56.0, employment sub-50 for 33 months",
+        nextDate: "Aug 3",
+        upColor: C.green,
+        downColor: C.red,
+        history: [58.7, 57.6, 47.4, 49.1, 50.9, 51.8, 52.5, 53.0, 54.0, 53.3],
+        historyLabels: ["2021", "Jun '26"],
+        relevance:
+          "Manufacturing expansion continuing without headcount growth (employment index still contracting) is a direct read on industrial issuers in the portfolio — output and revenue can still grow even while employer headcount stays flat, often a margin tailwind for growth-oriented credits in this sector.",
+      },
+      {
+        label: "ISM Services PMI",
+        liveKey: "ismServices",
+        releaseKey: "ismServices",
+        value: "54.0",
+        delta: "-0.5pt",
+        dir: "down",
+        prior: "24th straight month of expansion; business activity fell to 55.4 and new orders to 55.1, but employment expanded (51.2) for the first time in 4 months",
+        nextDate: "Aug 5",
+        upColor: C.green,
+        downColor: C.red,
+        history: [58.7, 51.6, 49.2, 52.6, 54.1, 53.6, 54.5, 54.0],
+        historyLabels: ["2021", "Jun '26"],
+        relevance:
+          "Services make up the large majority of GDP and of the portfolio's issuer base, so this is arguably the single most relevant activity index here. The prices index easing to 67.7 (still elevated, but its lowest in four months) alongside employment finally expanding is a genuinely mixed signal — margin pressure easing slightly even as demand growth cools.",
+      },
+      {
+        label: "China Manufacturing PMI",
+        liveKey: "chinaPMI",
+        releaseKey: "chinaPMI",
+        value: "51.7",
+        delta: "-0.1pt",
+        dir: "down",
+        prior: "3-month low but still expansionary; strongest quarter since late 2020; new export orders fell for a 2nd month",
+        nextDate: "~Aug 1",
+        upColor: C.green,
+        downColor: C.red,
+        history: [51.3, 49.1, 49.2, 50.8, 50.1, 50.8, 52.2, 51.8, 51.7],
+        historyLabels: ["2021", "Jun '26"],
+        relevance:
+          "Matters mainly through input costs and supply-chain timing for any portfolio issuer with import exposure — continued Chinese expansion plus tariff uncertainty is a live variable in credit diligence on import-exposed borrowers.",
+      },
+    ],
+  },
+  {
+    title: "Growth",
+    note: "The macro backdrop for growth-oriented underwriting",
+    metrics: [
+      {
+        label: "Real GDP (QoQ SAAR)",
+        releaseKey: "gdp",
+        liveKey: "gdp",
+        value: "2.1%",
+        delta: "Q1 '26, revised +0.5pt",
+        dir: "up",
+        prior: "Advance 2.0% → second 1.6% → third/final 2.1%; Q4 '25 was just 0.5% amid the government shutdown drag. Chart shows annual average growth (smoother than noisy quarter-to-quarter SAAR)",
+        nextDate: "Jul 30",
+        upColor: C.green,
+        downColor: C.red,
+        history: [5.8, 2.1, 2.5, 2.8, 2.1, 2.1],
+        historyLabels: ["2021 avg", "Q1 '26"],
+        relevance:
+          "Q2 2026 advance estimate lands July 30, one day after the FOMC decision — a two-punch data week. Below-trend but positive growth is the base case that supports your stated preference for growth-oriented over distressed/turnaround credits; a downside surprise would shift the opportunity set toward special situations.",
+      },
+      {
+        label: "GDPNow (Atlanta Fed, Q2 tracking)",
+        liveKey: "gdpnow",
+        value: "+3.0%",
+        delta: "as of Jun 17 update",
+        dir: "flat",
+        prior: "A running nowcast, not an official BEA figure; Q2 2026 tracking began near trend and has firmed since, well above Q1's 2.1% final",
+        nextDate: "Updates ~weekly",
+        upColor: C.green,
+        downColor: C.red,
+        history: [-1.5, 2.5, 2.0, 5.6, 2.5, 2.0, 3.0],
+        historyLabels: ["2021", "Jun 17 '26"],
+        relevance:
+          "Gives you an early read on where growth is trending before the official July 30 advance estimate, letting you stress-test credit models against the current growth trajectory rather than waiting for the lagging official print. A tracking estimate this far above Q1's 2.1% would be a genuinely constructive signal for growth-oriented underwriting if it holds through quarter-end.",
+      },
+    ],
+  },
+  {
+    title: "Credit & Capital Markets",
+    note: "Where your day job actually lives",
+    metrics: [
+      {
+        label: "HY OAS (ICE BofA)",
+        liveKey: "hyoas",
+        value: "269bp",
+        delta: "near cycle-tight",
+        dir: "flat",
+        prior: "Range this cycle: ~259bp (Jan '25) to 461bp (Apr '25 tariff shock)",
+        nextDate: "Daily",
+        history: [360, 283, 569, 469, 390, 339, 260, 350, 300, 269],
+        historyLabels: ["2021", "Jul '26"],
+        relevance:
+          "The cleanest market-priced read on default risk appetite. Compression this tight into a decelerating labor market is the definition of late-cycle — historically a setup where index-level spreads stay calm while individual credits (especially tariff- or rate-exposed issuers refinancing into 2026–27) reprice sharply on idiosyncratic news.",
+      },
+      {
+        label: "IG Corporate OAS",
+        liveKey: "igoas",
+        value: "~80bp",
+        delta: "near 25yr tights",
+        dir: "flat",
+        prior: "BBB spreads ~100bp; AA spreads ~50bp",
+        nextDate: "Daily",
+        history: [92, 92, 130, 120, 105, 95, 90, 88, 85, 80],
+        historyLabels: ["2021", "Jul '26"],
+        relevance:
+          "Investment-grade spread compression this extreme signals strong technical demand (AI-capex-driven issuance notwithstanding) rather than genuinely improving credit quality — a reminder that all-in yields look attractive mainly because Treasury yields are elevated, not because you're being paid much for risk.",
+      },
+      {
+        label: "Leveraged Loan / Direct Lending Backdrop",
+        value: "Selective",
+        delta: "qualitative",
+        dir: "flat",
+        prior: "Private credit spreads have compressed on strong LP inflows into direct lending funds",
+        nextDate: "Ongoing",
+        relevance:
+          "Directly relevant to sourcing at Invesco Credit Partners — tight liquid-market spreads push more sponsor-backed and special situations deal flow toward private credit, but competition for the highest-quality growth credits has intensified, compressing all-in unitranche yields on the best names.",
+      },
+      {
+        label: "Equity Volatility (VIX)",
+        liveKey: "vix",
+        value: "Low / range-bound",
+        delta: "qualitative",
+        dir: "flat",
+        prior: "Equity markets have largely shrugged off Middle East escalation and the June jobs miss",
+        nextDate: "Daily",
+        relevance:
+          "Low equity vol alongside tight credit spreads is the market's way of saying it isn't pricing much downside risk right now. If that combination breaks — vol spiking while spreads are still tight — it's often the earliest cross-asset signal that credit is about to reprice.",
+      },
+    ],
+  },
+  {
+    title: "Special Situations & Market Themes",
+    note: "Where your specific mandate intersects the cycle",
+    metrics: [
+      {
+        label: "Refinancing Wall (2026–2027 Maturities)",
+        themeKey: "refiWall",
+        value: "Elevated",
+        delta: "qualitative",
+        dir: "flat",
+        prior: "A meaningful share of post-2020 leveraged loans and HY bonds issued at lower base rates mature into this window",
+        nextDate: "Ongoing",
+        relevance:
+          "Issuers that termed out debt at 2020–2022 rates now face refinancing at a materially higher base rate — this is the single most direct source of special situations deal flow in the current cycle, particularly for tariff-exposed or margin-compressed borrowers.",
+      },
+      {
+        label: "Tariff & Trade Policy Overhang",
+        themeKey: "tariffs",
+        value: "Live risk",
+        delta: "qualitative",
+        dir: "flat",
+        prior: "2025 tariffs continue passing through to input costs; a February 2026 Supreme Court ruling found certain IEEPA tariffs unlawful, forcing refunds",
+        nextDate: "Ongoing",
+        relevance:
+          "Tariff-exposed portfolio issuers (importers, manufacturers with foreign supply chains) carry both cost-structure and legal/refund uncertainty right now — worth an explicit diligence line item on any credit with meaningful import exposure.",
+      },
+      {
+        label: "Middle East Conflict & Energy Risk",
+        themeKey: "mideast",
+        value: "Elevated & volatile",
+        delta: "see WTI/Brent above",
+        dir: "flat",
+        prior: "Iran-Israel-US conflict has driven repeated oil price spikes in 2026; the interim ceasefire broke down in early July",
+        nextDate: "Ongoing",
+        relevance:
+          "The geopolitical driver behind the oil price swings tracked at the top of this dashboard, and by extension this year's inflation volatility and Fed policy path. A renewed escalation is the clearest near-term risk to the 'inflation is cooling' narrative markets want to believe right now.",
+      },
+    ],
+  },
+];
+
+function Dashboard() {
+  const live = useLiveData();
+  const staticAsOf = "July 16, 2026";
+
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh", padding: "0", fontFamily: sans }}>
+      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "40px 24px 80px" }}>
+        {/* Header */}
+        <div style={{ borderBottom: `1px solid ${C.line}`, paddingBottom: 20, marginBottom: 8 }}>
+          <div style={{ fontFamily: mono, fontSize: 11, color: C.goldDim, letterSpacing: 1.2, textTransform: "uppercase" }}>
+            Special Situations Credit — Macro Brief
+          </div>
+          <h1 style={{ fontFamily: serif, fontSize: 34, color: C.ink, margin: "6px 0 4px", fontWeight: 500 }}>
+            The ICP Macro Ledger
+          </h1>
+          <div style={{ fontFamily: sans, fontSize: 13, color: C.inkDim }}>
+            U.S.-focused, with global indicators kept where they feed back into credit and growth financing. Cards
+            marked <span style={{ color: C.blue }}>LIVE</span> show official data from the St. Louis Fed (FRED),
+            refreshed automatically on a schedule.
+          </div>
+        </div>
+
+        <LiveStatusBar live={live} />
+
+        <Takeaways live={live} />
+
+        <div style={{ marginTop: 24 }}>
+          <CreditGauge live={live} />
+        </div>
+
+        {sections.map((sec) => (
+          <div key={sec.title}>
+            <SectionHeader title={sec.title} note={sec.note} />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12 }}>
+              {sec.metrics.map((m) => (
+                <MetricCard key={sec.title + m.label} m={m} live={live} />
+              ))}
+            </div>
+          </div>
+        ))}
+
+        <div
+          style={{
+            marginTop: 40,
+            paddingTop: 20,
+            borderTop: `1px solid ${C.line}`,
+            fontFamily: sans,
+            fontSize: 11,
+            color: C.inkFaint,
+            lineHeight: 1.6,
+          }}
+        >
+          Cards marked LIVE display official series from the St. Louis Fed's FRED database (BLS, BEA, Federal
+          Reserve, ICE BofA indices, Freddie Mac, Census, U. Michigan, Atlanta Fed), refreshed automatically by a
+          scheduled job — the timestamp above shows the last refresh, and charts on those cards are actual ~5-year
+          historical series with exact dates, so the drag-to-explore readout is tick-accurate. "This Week's Read"
+          is regenerated on each refresh (from the data itself, or from data plus current news when the enhanced
+          commentary option is configured — the note beside it says which). Next-release dates are computed from
+          published schedules where deterministic (FOMC, jobs, ISM, ECB) and estimated otherwise (marked "est.").
+          ECB, China PMI, ISM Services, retail sales, existing home sales, and the three theme cards refresh only
+          when enhanced commentary is configured; otherwise they show a snapshot last reviewed {staticAsOf}, as do
+          the reconstructed chart shapes on non-LIVE cards. "Why it matters" notes are structural editorial context
+          and update only with revisions. Nothing here is investment advice.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<Dashboard />);
+</script>
+</body>
+</html>
