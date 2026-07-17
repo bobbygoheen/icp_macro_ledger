@@ -1,0 +1,35 @@
+name: Refresh macro data
+
+on:
+  schedule:
+    # Twice per weekday, roughly after US market open and after close (UTC).
+    - cron: "30 14 * * 1-5"
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch: {}   # lets you trigger a refresh manually from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch data from FRED
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python3 scripts/fetch_data.py
+
+      - name: Generate commentary and release dates
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python3 scripts/generate_commentary.py
+
+      - name: Commit updated data.json
+        run: |
+          git config user.name "macro-ledger-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data.json
+          git diff --cached --quiet && echo "No changes." || git commit -m "Refresh data $(date -u +%F)"
+          git push
