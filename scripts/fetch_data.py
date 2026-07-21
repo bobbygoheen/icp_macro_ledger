@@ -107,6 +107,19 @@ def downsample(obs, max_points=MAX_POINTS):
     return sampled
 
 
+def summarize(obs):
+    """Trailing-range stats from full-resolution, post-transform observations."""
+    vals_all = [v for _, v in obs]
+    stats = {"min5y": round(min(vals_all), 4), "max5y": round(max(vals_all), 4)}
+    latest_d = date.fromisoformat(obs[-1][0])
+    cutoff = latest_d - timedelta(days=365)
+    recent = [v for d, v in obs if date.fromisoformat(d) >= cutoff]
+    if len(recent) >= 2:
+        stats["min52"] = round(min(recent), 4)
+        stats["max52"] = round(max(recent), 4)
+    return stats
+
+
 def main():
     result = {"updated": date.today().isoformat(), "series": {}}
     failures = []
@@ -120,6 +133,7 @@ def main():
                 obs = diff(obs)
             if len(obs) < 2:
                 raise ValueError("insufficient observations")
+            stats = summarize(obs)  # from full resolution, before downsampling
             obs = downsample(obs)
             latest_date, latest = obs[-1]
             prev = obs[-2][1]
@@ -129,6 +143,7 @@ def main():
                 "latestDate": latest_date,
                 "dates": [d for d, _ in obs],
                 "values": [v for _, v in obs],
+                **stats,
             }
             print(f"OK   {key:14s} {sid:s} -> {latest} ({latest_date})")
         except Exception as e:
@@ -136,6 +151,27 @@ def main():
             print(f"SKIP {key:14s} {sid}: {e}")
 
     out_path = os.path.join(os.path.dirname(__file__), "..", "data.json")
+
+    # Carry forward the commentary layer from the previous data.json so a
+    # failed or key-less commentary run keeps the last successful set (theme
+    # cards, consensus, etc.). Also stash the previous run's latest values so
+    # the frontend can show "what changed since the last refresh."
+    try:
+        with open(out_path) as f:
+            prior = json.load(f)
+        for k in ("commentary", "themeCards", "extraSeries", "themes",
+                  "releases", "consensus", "surprises", "regime", "calendar"):
+            if k in prior:
+                result[k] = prior[k]
+        prev_run = {}
+        for key, s in prior.get("series", {}).items():
+            if s.get("latest") is not None:
+                prev_run[key] = {"latest": s["latest"], "latestDate": s.get("latestDate")}
+        if prev_run:
+            result["prevRun"] = prev_run
+    except Exception:
+        pass
+
     with open(out_path, "w") as f:
         json.dump(result, f, separators=(",", ":"))
     print(f"\nWrote data.json with {len(result['series'])} series "

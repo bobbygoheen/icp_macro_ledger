@@ -127,6 +127,118 @@ def compute_releases():
     return releases
 
 
+# Impact tiers for the calendar strip: what actually moves rates/credit.
+CALENDAR_SPEC = [
+    # (label, impact, key-for-consensus-match, date-source)
+    ("FOMC rate decision", "high", "FOMC", ("fomc",)),
+    ("Nonfarm payrolls & unemployment", "high", "Payrolls", ("jobs",)),
+    ("CPI (headline & core)", "high", "CPI", ("cpi",)),
+    ("Core PCE & GDP", "high", "PCE", ("pce",)),
+    ("PPI", "med", "PPI", ("ppi",)),
+    ("Retail sales", "med", "Retail Sales", ("retail",)),
+    ("ISM Manufacturing PMI", "med", "ISM Mfg", ("ismMfg",)),
+    ("ISM Services PMI", "med", "ISM Services", ("ismServices",)),
+    ("ECB rate decision", "med", "ECB", ("ecb",)),
+    ("Housing starts & permits", "med", "Housing Starts", ("housing",)),
+    ("Existing home sales", "low", "Existing Home Sales", ("existing",)),
+    ("U. Michigan sentiment (prelim)", "low", "UMich", ("umich",)),
+]
+
+
+def build_calendar(horizon_days=21):
+    """Chronological list of upcoming releases within the horizon, with impact tags."""
+    y, m = TODAY.year, TODAY.month
+    nm_y, nm_m = (y, m + 1) if m < 12 else (y + 1, 1)
+
+    date_sources = {
+        "fomc": next_occurrence(FOMC_2026),
+        "ecb": next_occurrence(ECB_2026),
+        "jobs": next_occurrence([first_weekday_of_month(y, m, 4), first_weekday_of_month(nm_y, nm_m, 4)]),
+        "ismMfg": next_occurrence([nth_business_day(y, m, 1), nth_business_day(nm_y, nm_m, 1)]),
+        "ismServices": next_occurrence([nth_business_day(y, m, 3), nth_business_day(nm_y, nm_m, 3)]),
+        "cpi": approx_monthly(12),
+        "ppi": approx_monthly(13),
+        "retail": approx_monthly(15),
+        "housing": approx_monthly(17),
+        "existing": approx_monthly(21),
+        "pce": approx_monthly(28),
+        "umich": next_occurrence([first_weekday_of_month(yy, mm, 4) + timedelta(days=7) for (yy, mm) in [(y, m), (nm_y, nm_m)]]),
+    }
+    est_keys = {"cpi", "ppi", "retail", "housing", "existing", "pce", "umich"}
+
+    horizon_end = TODAY + timedelta(days=horizon_days)
+    items = []
+    for label, impact, consensus_key, (src,) in CALENDAR_SPEC:
+        d = date_sources.get(src)
+        if d and TODAY < d <= horizon_end:
+            items.append({
+                "date": d.isoformat(),
+                "display": fmt(d, est=(src in est_keys)),
+                "label": label,
+                "impact": impact,
+                "consensusKey": consensus_key,
+            })
+    # Weekly jobless claims: add each Thursday in the horizon (low impact).
+    d = TODAY + timedelta(days=(3 - TODAY.weekday()) % 7 or 7)
+    while d <= horizon_end:
+        items.append({"date": d.isoformat(), "display": fmt(d), "label": "Initial jobless claims",
+                      "impact": "low", "consensusKey": "Claims"})
+        d += timedelta(days=7)
+
+    items.sort(key=lambda x: x["date"])
+    return items
+
+
+def compute_regime(series):
+    """One-line macro-regime read derived from the data (rules-based)."""
+    parts = []
+    phase = "Mid-cycle"
+
+    hy = get(series, "hyoas")
+    if hy:
+        r = pct_rank(hy)
+        if r is not None:
+            if r <= 25:
+                parts.append("credit spreads near cycle tights")
+                phase = "Late-cycle"
+            elif r >= 75:
+                parts.append("credit spreads elevated / widening")
+                phase = "Stress"
+            else:
+                parts.append("credit spreads mid-range")
+
+    pay = get(series, "payrolls")
+    if pay:
+        vals = pay.get("values", [])
+        if len(vals) >= 4:
+            recent = sum(vals[-2:]) / 2
+            earlier = sum(vals[-4:-2]) / 2
+            if recent < earlier * 0.7:
+                parts.append("labor market cooling")
+                if phase == "Late-cycle":
+                    phase = "Late-cycle / softening"
+            elif recent > earlier * 1.3:
+                parts.append("labor market reaccelerating")
+            else:
+                parts.append("labor market steady")
+
+    core = get(series, "pceCore") or get(series, "cpiCore")
+    if core:
+        if core["latest"] >= 2.8:
+            parts.append(f"core inflation sticky at {core['latest']:.1f}%")
+        elif core["latest"] <= 2.3:
+            parts.append(f"core inflation near target ({core['latest']:.1f}%)")
+        else:
+            parts.append(f"core inflation {core['latest']:.1f}%")
+
+    curve = get(series, "curve")
+    if curve:
+        parts.append("curve inverted" if curve["latest"] < 0 else "curve positively sloped")
+
+    detail = "; ".join(parts) + "." if parts else "Insufficient data for a regime read."
+    return {"label": phase, "detail": detail, "source": "rules"}
+
+
 # ----------------------------------------------------------------------
 # Rule-based takeaways from the actual data
 # ----------------------------------------------------------------------
@@ -252,15 +364,21 @@ CLAUDE_PROMPT_TEMPLATE = """You are writing the daily brief for a macro dashboar
 
 Here are the latest values from FRED (JSON): {summary}
 
-Do the following, using web search where needed (max 4 searches):
+Do the following, using web search where needed (max 5 searches):
 1. Write 6-7 concise takeaways (2-3 sentences each) on what currently matters most across: energy, labor, inflation, policy/rates, credit markets, growth, consumer/housing — grounded in the numbers above plus any major macro news from the past week. Angle everything toward special situations / growth-oriented credit investing. No investment advice, just analysis.
 2. Find current values for these series (not in FRED): ECB deposit rate, China official manufacturing PMI, ISM Services PMI, US retail sales (latest m/m %), US existing home sales (millions SAAR).
-3. Write a 1-2 sentence status update for each of three standing themes: the 2026-27 refinancing wall, US tariff/trade policy, Middle East conflict & energy risk.
+3. Identify the special situations / market themes MOST MATERIAL to a special-situations credit investor RIGHT NOW, based on current global developments from the past week or two. Pick between 3 and 6 themes — the actual number depends on how much is genuinely material right now, don't pad to hit a target. These are not a fixed list: a theme could be a refinancing wall, a specific sector under stress (e.g. CRE, autos, healthcare), a sovereign or geopolitical event, a commodity or energy shock, a regulatory/legal ruling, a dislocation in a specific credit market, a large idiosyncratic default or restructuring, etc. Choose whatever is actually driving special-situations opportunity or risk today. For each: a short title (3-6 words), a one-word status ("Acute", "Elevated", "Emerging", "Easing", "Live risk"), a directional flag, a 1-2 sentence status line describing the current situation, and a 1-2 sentence note on why it matters specifically for special-situations credit.
+4. For the next few high-impact US releases (CPI, Payrolls, Core PCE, PPI, Retail Sales, ISM Mfg, ISM Services, GDP as applicable), give the current market consensus expectation. Use these exact labels as keys: "CPI", "Payrolls", "PCE", "PPI", "Retail Sales", "ISM Mfg", "ISM Services", "GDP".
+5. For any of those indicators that printed in the LAST ~10 DAYS, give the actual vs. consensus surprise.
+6. Write a one-line macro-regime summary (a phase label plus a short clause), e.g. "Late-cycle — tight spreads, cooling labor, sticky core inflation."
 
 Respond with ONLY this JSON (no markdown fences, no other text):
 {{"takeaways":[{{"tag":"Energy","text":"..."}}],
 "extraSeries":{{"ecb":{{"value":"N.NN%","delta":"context","dir":"up|down|flat"}},"chinaPMI":{{"value":"NN.N","delta":"context","dir":"up|down|flat"}},"ismServices":{{"value":"NN.N","delta":"context","dir":"up|down|flat"}},"retailSales":{{"value":"+N.N% m/m","delta":"context","dir":"up|down|flat"}},"existingHome":{{"value":"N.NNM","delta":"context","dir":"up|down|flat"}}}},
-"themes":{{"refiWall":"...","tariffs":"...","mideast":"..."}}}}"""
+"themeCards":[{{"title":"3-6 word title","value":"Elevated","dir":"up|down|flat","statusLine":"1-2 sentence current situation","relevance":"1-2 sentences on why it matters for special situations credit"}}],
+"consensus":{{"CPI":"3.4% YoY exp","Payrolls":"+80K exp"}},
+"surprises":[{{"label":"CPI","actual":"3.5%","consensus":"3.4%","dir":"up"}}],
+"regime":{{"label":"Late-cycle","detail":"tight spreads, cooling labor, sticky core inflation"}}}}"""
 
 
 def claude_enhance(series):
@@ -275,7 +393,12 @@ def claude_enhance(series):
 
     prompt = CLAUDE_PROMPT_TEMPLATE.format(today=TODAY.isoformat(), summary=json.dumps(summary))
     body = json.dumps({
-        "model": "claude-sonnet-4-6",
+        # Current cost-effective model for this task (verified against
+        # docs.claude.com). Haiku 4.5 is the cheapest capable option and
+        # plenty for a structured data+news summary run twice a day. Swap to
+        # "claude-sonnet-5" for richer commentary at higher cost. Always
+        # verify the current string at docs.claude.com before changing.
+        "model": "claude-haiku-4-5",
         "max_tokens": 2500,
         "messages": [{"role": "user", "content": prompt}],
         "tools": [{"type": "web_search_20250305", "name": "web_search"}],
@@ -314,6 +437,7 @@ def main():
     series = data.get("series", {})
 
     data["releases"] = compute_releases()
+    data["calendar"] = build_calendar()
 
     enhanced = claude_enhance(series)
     if enhanced:
@@ -324,22 +448,34 @@ def main():
         }
         if enhanced.get("extraSeries"):
             data["extraSeries"] = enhanced["extraSeries"]
-        if enhanced.get("themes"):
-            data["themes"] = enhanced["themes"]
-        print("Commentary: Claude-enhanced.")
+        tc = enhanced.get("themeCards")
+        if isinstance(tc, list) and len(tc) >= 1:
+            data["themeCards"] = tc[:6]
+        if enhanced.get("consensus"):
+            data["consensus"] = enhanced["consensus"]
+        if enhanced.get("surprises"):
+            data["surprises"] = enhanced["surprises"]
+        if enhanced.get("regime"):
+            data["regime"] = {**enhanced["regime"], "source": "claude"}
+        else:
+            data["regime"] = compute_regime(series)
+        print(f"Commentary: Claude-enhanced ({len(data.get('themeCards', []))} theme cards, "
+              f"{len(data.get('consensus', {}))} consensus, {len(data.get('surprises', []))} surprises).")
     else:
         data["commentary"] = {
             "source": "rules",
             "generated": TODAY.isoformat(),
             "items": rule_takeaways(series),
         }
-        print("Commentary: rule-based.")
+        data["regime"] = compute_regime(series)
+        print("Commentary: rule-based (theme cards & consensus unchanged from last run).")
 
     with open(DATA_PATH, "w") as f:
         json.dump(data, f, separators=(",", ":"))
     print(f"Wrote commentary ({len(data['commentary']['items'])} takeaways), "
-          f"releases ({len(data['releases'])}), "
-          f"extraSeries ({len(data.get('extraSeries', {}))}).")
+          f"calendar ({len(data['calendar'])} events), "
+          f"regime ({data['regime']['label']}), "
+          f"themeCards ({len(data.get('themeCards', []))}).")
 
 
 if __name__ == "__main__":
