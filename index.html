@@ -1342,6 +1342,11 @@ const MOVER_LABELS = {
   pceCore: "Core PCE", unemployment: "Unemployment", payrolls: "Payrolls",
   umich: "UMich", mortgage30y: "Mortgage", vix: "VIX", claims: "Claims",
 };
+// Which direction is "good" (green) for each mover. For most credit-relevant
+// series a rise is unfavorable (rates, spreads, inflation, unemployment,
+// claims, mortgage, vol) so up=red. For a few, a rise is favorable
+// (sentiment, payrolls) so up=green. Matches the per-card colors below.
+const MOVER_UP_IS_GOOD = { umich: true, payrolls: true, curve: true };
 function WhatChanged({ live }) {
   const series = live.seriesRaw;
   if (!series) return null;
@@ -1382,7 +1387,9 @@ function WhatChanged({ live }) {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
         {top.map((m) => {
           const up = m.diff > 0;
-          const col = up ? C.red : C.green; // up=red convention (tightening/inflationary bias)
+          const upIsGood = MOVER_UP_IS_GOOD[m.key] || false;
+          // Favorable move => green, unfavorable => red, matching the cards.
+          const col = up === upIsGood ? C.green : C.red;
           return (
             <div
               key={m.key}
