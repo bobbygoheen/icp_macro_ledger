@@ -89,7 +89,11 @@ function formatDelta(key, latest, prev) {
   } else {
     const scaled = rawDiff * (f.deltaScale || 1);
     const dec = f.deltaDecimals != null ? f.deltaDecimals : 1;
-    text = `${scaled >= 0 ? "+" : ""}${scaled.toFixed(dec)}${f.deltaUnit || ""}`;
+    const u = f.deltaUnit || "";
+    const sign = scaled >= 0 ? "+" : "-";
+    const mag = Math.abs(scaled).toFixed(dec);
+    // Currency symbols read as a prefix ("+$1.28"); other units as a suffix ("+57K").
+    text = u === "$" ? `${sign}$${mag}` : `${sign}${mag}${u}`;
   }
   return `${text} ${f.period || ""}`.trim();
 }
@@ -101,11 +105,60 @@ function shortDateLabel(iso) {
   return `${names[parseInt(m, 10) - 1]} '${y.slice(-2)}`;
 }
 
+// Builds the context line under each value (the "prior" slot) directly from
+// the series' own history, so it refreshes every run instead of going stale.
+// Prefers accurate trailing ranges computed server-side (min52/max52/min5y/
+// max5y in data.json); falls back to computing from the chart arrays so it
+// still works with an older data.json. fedfunds is skipped because its
+// formatter is itself a range template.
+function computeContext(key, s) {
+  const f = FORMATS[key];
+  if (!f || key === "fedfunds" || typeof f.fmt !== "function") return null;
+  const vals = s.values || [];
+  const dates = s.dates || [];
+  if (vals.length < 3) return null;
+
+  let min5 = s.min5y, max5 = s.max5y, min52 = s.min52, max52 = s.max52;
+  if (min5 == null || max5 == null) {
+    min5 = Math.min(...vals);
+    max5 = Math.max(...vals);
+  }
+  if ((min52 == null || max52 == null) && dates.length === vals.length) {
+    const latest = new Date(dates[dates.length - 1]);
+    const cutoff = new Date(latest);
+    cutoff.setFullYear(cutoff.getFullYear() - 1);
+    const recent = vals.filter((v, i) => new Date(dates[i]) >= cutoff);
+    if (recent.length >= 2) {
+      min52 = Math.min(...recent);
+      max52 = Math.max(...recent);
+    }
+  }
+
+  const fmt = (v) => {
+    try { return f.fmt(v); } catch (e) { return String(v); }
+  };
+  let line;
+  if (min52 != null && max52 != null) {
+    line = `Past year: ${fmt(min52)} – ${fmt(max52)} · 5-yr: ${fmt(min5)} – ${fmt(max5)}`;
+  } else {
+    line = `5-yr range: ${fmt(min5)} – ${fmt(max5)}`;
+  }
+  if (s.latestDate) line += ` · latest ${shortDateLabel(s.latestDate)}`;
+  return line;
+}
+
 function useLiveData() {
   const [liveData, setLiveData] = useState({});
   const [commentary, setCommentary] = useState(null);
   const [releases, setReleases] = useState({});
   const [themes, setThemes] = useState(null);
+  const [themeCards, setThemeCards] = useState(null);
+  const [calendar, setCalendar] = useState(null);
+  const [regime, setRegime] = useState(null);
+  const [consensus, setConsensus] = useState(null);
+  const [surprises, setSurprises] = useState(null);
+  const [prevRun, setPrevRun] = useState(null);
+  const [seriesRaw, setSeriesRaw] = useState(null);
   const [status, setStatus] = useState("idle"); // idle | loading | success | partial | error
   const [asOfLive, setAsOfLive] = useState(null);
 
@@ -129,6 +182,7 @@ function useLiveData() {
           history: s.values.map((v) => v * (f.histScale || 1)),
           historyLabels: s.dates.map(shortDateLabel), // one label per point => exact scrub dates
           latestDate: s.latestDate,
+          contextLine: computeContext(key, s),
         };
       });
       if (Object.keys(nd).length === 0) throw new Error("No usable series in data.json");
@@ -145,6 +199,13 @@ function useLiveData() {
       setCommentary(payload.commentary || null);
       setReleases(payload.releases || {});
       setThemes(payload.themes || null);
+      setThemeCards(payload.themeCards || null);
+      setCalendar(payload.calendar || null);
+      setRegime(payload.regime || null);
+      setConsensus(payload.consensus || null);
+      setSurprises(payload.surprises || null);
+      setPrevRun(payload.prevRun || null);
+      setSeriesRaw(series);
       setAsOfLive(payload.updated || null);
       setStatus(Object.keys(nd).length >= 15 ? "success" : "partial");
     } catch (e) {
@@ -157,7 +218,7 @@ function useLiveData() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { liveData, commentary, releases, themes, status, asOfLive, refresh: fetchLive };
+  return { liveData, commentary, releases, themes, themeCards, calendar, regime, consensus, surprises, prevRun, seriesRaw, status, asOfLive, refresh: fetchLive };
 }
 
 function Pill({ children, tone = "gold" }) {
@@ -340,9 +401,9 @@ function MetricCard({ m, live }) {
   const value = liveEntry?.value || m.value;
   const delta = liveEntry?.delta || m.delta;
   const dir = liveEntry?.dir || m.dir;
-  const isLive = !!liveEntry || !!(m.themeKey && live.themes?.[m.themeKey]);
+  const isLive = m.forceLive || !!liveEntry || !!(m.themeKey && live.themes?.[m.themeKey]);
   const nextDate = (m.releaseKey && live.releases?.[m.releaseKey]) || m.nextDate;
-  const prior = (m.themeKey && live.themes?.[m.themeKey]) || m.prior;
+  const prior = (m.themeKey && live.themes?.[m.themeKey]) || liveEntry?.contextLine || m.prior;
 
   const dirColor = dir === "up" ? m.upColor || C.red : dir === "down" ? m.downColor || C.green : C.inkFaint;
   const glyph = dir === "up" ? "▲" : dir === "down" ? "▼" : "▬";
@@ -1172,6 +1233,201 @@ const sections = [
   },
 ];
 
+// #4 — Regime banner: one-line macro-regime read under the header.
+function RegimeBanner({ live }) {
+  const r = live.regime;
+  if (!r || !r.label) return null;
+  return (
+    <div
+      style={{
+        marginTop: 18,
+        padding: "12px 16px",
+        background: "linear-gradient(90deg, rgba(201,162,75,0.10), rgba(201,162,75,0.02))",
+        border: `1px solid ${C.goldDim}`,
+        borderRadius: 6,
+        display: "flex",
+        alignItems: "baseline",
+        gap: 12,
+        flexWrap: "wrap",
+      }}
+    >
+      <span style={{ fontFamily: mono, fontSize: 10.5, letterSpacing: 0.8, textTransform: "uppercase", color: C.gold }}>
+        Regime
+      </span>
+      <span style={{ fontFamily: serif, fontSize: 16, color: C.ink, fontWeight: 500 }}>{r.label}</span>
+      <span style={{ fontFamily: sans, fontSize: 12.5, color: C.inkDim, flex: 1, minWidth: 200 }}>{r.detail}</span>
+      {r.source === "rules" && (
+        <span style={{ fontFamily: mono, fontSize: 9, color: C.inkFaint }}>computed from data</span>
+      )}
+    </div>
+  );
+}
+
+// #1 — Upcoming releases calendar strip, with #3 consensus merged in.
+const IMPACT_STYLE = {
+  high: { fg: C.red, label: "High" },
+  med: { fg: C.gold, label: "Med" },
+  low: { fg: C.inkFaint, label: "Low" },
+};
+function CalendarStrip({ live }) {
+  const cal = live.calendar;
+  if (!cal || cal.length === 0) return null;
+  const consensus = live.consensus || {};
+  const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+  return (
+    <div style={{ background: C.panelAlt, border: `1px solid ${C.line}`, borderRadius: 6, padding: "20px 22px", marginTop: 12 }}>
+      <div style={{ fontFamily: sans, fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", color: C.inkFaint, marginBottom: 14 }}>
+        Upcoming Releases — Next 3 Weeks
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        {cal.map((e, i) => {
+          const imp = IMPACT_STYLE[e.impact] || IMPACT_STYLE.low;
+          const d = new Date(e.date + "T00:00:00");
+          const dow = names[d.getDay()];
+          const exp = e.consensusKey && consensus[e.consensusKey];
+          return (
+            <div
+              key={i}
+              style={{
+                display: "flex",
+                alignItems: "baseline",
+                gap: 12,
+                padding: "8px 0",
+                borderBottom: i < cal.length - 1 ? `1px solid ${C.line}` : "none",
+              }}
+            >
+              <span style={{ fontFamily: mono, fontSize: 11, color: C.ink, minWidth: 92, flexShrink: 0 }}>
+                {dow} {e.display}
+              </span>
+              <span
+                style={{
+                  fontFamily: mono,
+                  fontSize: 9,
+                  letterSpacing: 0.4,
+                  textTransform: "uppercase",
+                  color: imp.fg,
+                  border: `1px solid ${imp.fg}`,
+                  borderRadius: 3,
+                  padding: "1px 5px",
+                  flexShrink: 0,
+                  opacity: 0.9,
+                }}
+              >
+                {imp.label}
+              </span>
+              <span style={{ fontFamily: sans, fontSize: 12.5, color: C.inkDim, flex: 1 }}>{e.label}</span>
+              {exp && (
+                <span style={{ fontFamily: mono, fontSize: 10.5, color: C.blue, flexShrink: 0 }}>exp: {exp}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {Object.keys(consensus).length === 0 && (
+        <div style={{ fontFamily: sans, fontSize: 10.5, color: C.inkFaint, marginTop: 10, fontStyle: "italic" }}>
+          Consensus expectations appear here when enhanced commentary is configured.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// #2 — "What changed": biggest movers since the previous refresh (falls back
+// to latest-vs-prior-observation when no prior-run snapshot exists), plus any
+// consensus surprises (#3) from recent prints.
+const MOVER_LABELS = {
+  wti: "WTI", brent: "Brent", ust10y: "10Y", ust2y: "2Y", curve: "Curve",
+  hyoas: "HY OAS", igoas: "IG OAS", cpiHeadline: "CPI", cpiCore: "Core CPI",
+  pceCore: "Core PCE", unemployment: "Unemployment", payrolls: "Payrolls",
+  umich: "UMich", mortgage30y: "Mortgage", vix: "VIX", claims: "Claims",
+};
+function WhatChanged({ live }) {
+  const series = live.seriesRaw;
+  if (!series) return null;
+  const prev = live.prevRun || {};
+  const movers = [];
+
+  Object.keys(MOVER_LABELS).forEach((key) => {
+    const s = series[key];
+    const f = FORMATS[key];
+    if (!s || s.latest == null || !f) return;
+    let base, changed;
+    const p = prev[key];
+    if (p && p.latestDate && p.latestDate !== s.latestDate) {
+      base = p.latest; // genuine change since last refresh
+      changed = true;
+    } else if (s.prev != null) {
+      base = s.prev; // fall back to last-vs-prior observation
+      changed = false;
+    } else return;
+    const diff = s.latest - base;
+    if (Math.abs(diff) < 1e-9) return;
+    const denom = Math.abs(base) > 1e-9 ? Math.abs(base) : 1;
+    movers.push({ key, diff, magnitude: Math.abs(diff) / denom, changed, deltaText: formatDelta(key, s.latest, base).split(" ")[0] });
+  });
+
+  movers.sort((a, b) => b.magnitude - a.magnitude);
+  const top = movers.slice(0, 5);
+  const surprises = live.surprises || [];
+  if (top.length === 0 && surprises.length === 0) return null;
+
+  const anyCrossRun = top.some((m) => m.changed);
+
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 6, padding: "16px 18px", marginTop: 12 }}>
+      <div style={{ fontFamily: sans, fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", color: C.inkFaint, marginBottom: 12 }}>
+        {anyCrossRun ? "What Moved Since Last Refresh" : "Notable Moves in the Latest Data"}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+        {top.map((m) => {
+          const up = m.diff > 0;
+          const col = up ? C.red : C.green; // up=red convention (tightening/inflationary bias)
+          return (
+            <div
+              key={m.key}
+              style={{
+                display: "flex",
+                alignItems: "baseline",
+                gap: 6,
+                background: C.panelAlt,
+                border: `1px solid ${C.line}`,
+                borderRadius: 4,
+                padding: "6px 10px",
+              }}
+            >
+              <span style={{ fontFamily: sans, fontSize: 11.5, color: C.inkDim }}>{MOVER_LABELS[m.key]}</span>
+              <span style={{ fontFamily: mono, fontSize: 12, color: col }}>
+                {up ? "▲" : "▼"} {m.deltaText}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {surprises.length > 0 && (
+        <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${C.line}` }}>
+          <div style={{ fontFamily: sans, fontSize: 10.5, letterSpacing: 0.5, textTransform: "uppercase", color: C.inkFaint, marginBottom: 8 }}>
+            Recent Surprises vs. Consensus
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {surprises.map((s, i) => {
+              const up = s.dir === "up";
+              const col = up ? C.red : s.dir === "down" ? C.green : C.inkFaint;
+              return (
+                <div key={i} style={{ fontFamily: sans, fontSize: 12.5, color: C.ink }}>
+                  <span style={{ fontFamily: mono, color: C.gold, fontSize: 11 }}>{s.label}: </span>
+                  actual <span style={{ fontFamily: mono, color: col }}>{s.actual}</span> vs.{" "}
+                  <span style={{ fontFamily: mono, color: C.inkDim }}>{s.consensus}</span> expected
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Dashboard() {
   const live = useLiveData();
   const staticAsOf = "July 16, 2026";
@@ -1194,7 +1450,13 @@ function Dashboard() {
           </div>
         </div>
 
+        <RegimeBanner live={live} />
+
         <LiveStatusBar live={live} />
+
+        <WhatChanged live={live} />
+
+        <CalendarStrip live={live} />
 
         <Takeaways live={live} />
 
@@ -1202,16 +1464,42 @@ function Dashboard() {
           <CreditGauge live={live} />
         </div>
 
-        {sections.map((sec) => (
-          <div key={sec.title}>
-            <SectionHeader title={sec.title} note={sec.note} />
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12 }}>
-              {sec.metrics.map((m) => (
-                <MetricCard key={sec.title + m.label} m={m} live={live} />
-              ))}
+        {sections.map((sec) => {
+          const isThemeSec = sec.title === "Special Situations & Market Themes";
+          // When Claude has selected a fresh set of themes, render those
+          // (up to 6) instead of the hardcoded fallback trio. The fallback
+          // also doubles as the first-run state before any enhanced run.
+          const dynamic =
+            isThemeSec && live.themeCards && live.themeCards.length > 0
+              ? live.themeCards.map((tc) => ({
+                  label: tc.title || "Market Theme",
+                  value: tc.value || "Active",
+                  delta: tc.delta || "",
+                  dir: tc.dir || "flat",
+                  prior: tc.statusLine || "",
+                  relevance: tc.relevance || "",
+                  nextDate: "Live",
+                  forceLive: true,
+                  upColor: C.red,
+                  downColor: C.green,
+                }))
+              : null;
+          const metrics = dynamic || sec.metrics;
+          const note =
+            isThemeSec && dynamic
+              ? `Selected from current developments${live.commentary?.generated ? " · " + live.commentary.generated : ""}`
+              : sec.note;
+          return (
+            <div key={sec.title}>
+              <SectionHeader title={sec.title} note={note} />
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12 }}>
+                {metrics.map((m) => (
+                  <MetricCard key={sec.title + m.label} m={m} live={live} />
+                ))}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
 
         <div
           style={{
@@ -1231,10 +1519,15 @@ function Dashboard() {
           is regenerated on each refresh (from the data itself, or from data plus current news when the enhanced
           commentary option is configured — the note beside it says which). Next-release dates are computed from
           published schedules where deterministic (FOMC, jobs, ISM, ECB) and estimated otherwise (marked "est.").
-          ECB, China PMI, ISM Services, retail sales, existing home sales, and the three theme cards refresh only
-          when enhanced commentary is configured; otherwise they show a snapshot last reviewed {staticAsOf}, as do
-          the reconstructed chart shapes on non-LIVE cards. "Why it matters" notes are structural editorial context
-          and update only with revisions. Nothing here is investment advice.
+          ECB, China PMI, ISM Services, retail sales, and existing home sales refresh only when enhanced commentary
+          is configured; otherwise they show a snapshot last reviewed {staticAsOf}, as do the reconstructed chart
+          shapes on non-LIVE cards. The Special Situations & Market Themes cards are fully dynamic when enhanced
+          commentary is on — Claude selects the 3-6 themes most material to special-situations credit on each
+          refresh from current global developments, and the last successful set persists if a refresh fails or the
+          key is absent (the three shown before any enhanced run are defaults). "Why it matters" notes are structural editorial context
+          and update only with revisions. The regime banner, upcoming-releases calendar, and "what moved" panel are
+          computed each refresh from the data and schedules; consensus expectations and recent surprises populate on
+          the calendar and moves panel only when enhanced commentary is configured. Nothing here is investment advice.
         </div>
       </div>
     </div>
