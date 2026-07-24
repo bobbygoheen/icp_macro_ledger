@@ -53,7 +53,7 @@ SERIES = {
     "vix":          ("VIXCLS",           "level"),  # VIX, daily
 }
 
-MAX_POINTS = 90  # downsample long daily histories to keep data.json small
+MAX_POINTS = 260  # ~weekly resolution over 5y for daily series; monthly/weekly series stay full-resolution
 
 
 def fetch_series(series_id):

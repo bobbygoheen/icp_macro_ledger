@@ -475,6 +475,7 @@ Do the following, using web search where needed (max 5 searches):
 4. For the next few high-impact US releases (CPI, Payrolls, Core PCE, PPI, Retail Sales, ISM Mfg, ISM Services, GDP as applicable), give the current market consensus expectation. Use these exact labels as keys: "CPI", "Payrolls", "PCE", "PPI", "Retail Sales", "ISM Mfg", "ISM Services", "GDP".
 5. For any of those indicators that printed in the LAST ~10 DAYS, give the actual vs. consensus surprise.
 6. Write a one-line macro-regime summary (a phase label plus a short clause), e.g. "Late-cycle — tight spreads, cooling labor, sticky core inflation."
+7. Some official series are published to FRED on a delay. Find the MOST RECENT published reading (preliminary is fine) for each of these, with the month it refers to and whether it is prelim or final. Only include one if you are confident in the number from a reputable source (a news report of the official release is fine). "umich" = University of Michigan Consumer Sentiment headline index (a number roughly 40-110). "existingHome" = US existing home sales in millions, seasonally-adjusted annual rate (a number roughly 3.0-6.5). Omit any you cannot verify.
 
 Respond with ONLY this JSON (no markdown fences, no other text):
 {{"takeaways":[{{"tag":"Energy","text":"..."}}],
@@ -482,7 +483,8 @@ Respond with ONLY this JSON (no markdown fences, no other text):
 "themeCards":[{{"title":"3-6 word title","value":"Elevated","dir":"up|down|flat","statusLine":"1-2 sentence current situation","relevance":"1-2 sentences on why it matters for special situations credit"}}],
 "consensus":{{"CPI":"3.4% YoY exp","Payrolls":"+80K exp"}},
 "surprises":[{{"label":"CPI","actual":"3.5%","consensus":"3.4%","dir":"up"}}],
-"regime":{{"label":"Late-cycle","detail":"tight spreads, cooling labor, sticky core inflation"}}}}"""
+"regime":{{"label":"Late-cycle","detail":"tight spreads, cooling labor, sticky core inflation"}},
+"freshPoints":{{"umich":{{"value":51.2,"month":"2026-07","kind":"prelim"}},"existingHome":{{"value":4.02,"month":"2026-06","kind":"final"}}}}}}"""
 
 
 def claude_enhance(series):
@@ -536,6 +538,69 @@ def claude_enhance(series):
 
 # ----------------------------------------------------------------------
 
+# Series that FRED publishes on a delay, where a news-sourced latest point is
+# worth appending. "scale" converts the reported unit into the FRED unit;
+# "lo"/"hi" bound a sane value for validation (reject anything outside).
+FRESH_POINT_SPEC = {
+    "umich":       {"scale": 1,         "lo": 30,  "hi": 120},   # sentiment index
+    "existingHome": {"scale": 1_000_000, "lo": 2.5, "hi": 7.5},  # millions SAAR -> units
+}
+
+
+def _norm_month(s):
+    """Normalize '2026-07' or '2026-07-15' to a first-of-month ISO date."""
+    s = str(s).strip()
+    if len(s) == 7:
+        return s + "-01"
+    if len(s) == 10:
+        return s[:7] + "-01"
+    return None
+
+
+def apply_fresh_points(series, fresh):
+    """Append a validated, news-sourced latest point to delayed FRED series.
+
+    Runs from clean FRED data each time (fetch_data rewrites series before
+    this), so points never compound. The appended point is flagged
+    provisional so the frontend can mark it distinctly.
+    """
+    if not isinstance(fresh, dict):
+        return 0
+    applied = 0
+    for key, spec in FRESH_POINT_SPEC.items():
+        fp = fresh.get(key)
+        s = series.get(key)
+        if not fp or not s or "values" not in s or "dates" not in s:
+            continue
+        try:
+            raw = float(fp.get("value"))
+        except (TypeError, ValueError):
+            continue
+        if not (spec["lo"] <= raw <= spec["hi"]):
+            print(f"  fresh point for {key} rejected: {raw} out of range", file=sys.stderr)
+            continue
+        month = _norm_month(fp.get("month") or fp.get("date") or "")
+        if not month:
+            continue
+        # Only append if strictly newer than FRED's latest observation.
+        if s["dates"] and month <= s["dates"][-1]:
+            continue
+        value = round(raw * spec["scale"], 4)
+        s["dates"].append(month)
+        s["values"].append(value)
+        s["prev"] = s["latest"]
+        s["latest"] = value
+        s["latestDate"] = month
+        s["provisionalLast"] = True
+        s["provisionalKind"] = fp.get("kind", "prelim")
+        # Refresh trailing-range stats to include the new point.
+        vals = s["values"]
+        s["min5y"], s["max5y"] = round(min(vals), 4), round(max(vals), 4)
+        applied += 1
+        print(f"  appended provisional {key}: {value} ({month}, {s['provisionalKind']})")
+    return applied
+
+
 def main():
     with open(DATA_PATH) as f:
         data = json.load(f)
@@ -564,8 +629,10 @@ def main():
             data["regime"] = {**enhanced["regime"], "source": "claude"}
         else:
             data["regime"] = compute_regime(series)
+        applied = apply_fresh_points(series, enhanced.get("freshPoints"))
         print(f"Commentary: Claude-enhanced ({len(data.get('themeCards', []))} theme cards, "
-              f"{len(data.get('consensus', {}))} consensus, {len(data.get('surprises', []))} surprises).")
+              f"{len(data.get('consensus', {}))} consensus, {len(data.get('surprises', []))} surprises, "
+              f"{applied} fresh points appended).")
     else:
         data["commentary"] = {
             "source": "rules",
