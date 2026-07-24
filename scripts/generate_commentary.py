@@ -265,92 +265,196 @@ def chg(s, n=1):
     return s["latest"] - vals[-1 - n]
 
 
+CITE_RE = re.compile(r"</?cite[^>]*>", re.IGNORECASE)
+INDEX_RE = re.compile(r"\s*index\s*=\s*[\"'][^\"']*[\"']", re.IGNORECASE)
+
+
+def strip_citations(text):
+    """Remove citation markup that web-search responses can embed in prose.
+
+    The model may wrap cited claims in <cite index="2-1">...</cite>. Those tags
+    are meaningless in the dashboard and render as literal text, so strip the
+    tags (keeping the sentence inside) before parsing/persisting.
+    """
+    if not isinstance(text, str):
+        return text
+    out = CITE_RE.sub("", text)
+    out = INDEX_RE.sub("", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    return out.strip()
+
+
+def scrub(obj):
+    """Recursively strip citation markup from every string in a structure."""
+    if isinstance(obj, str):
+        return strip_citations(obj)
+    if isinstance(obj, list):
+        return [scrub(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: scrub(v) for k, v in obj.items()}
+    return obj
+
+
+def trend_word(s, n=3):
+    """Direction over the last n observations."""
+    vals = s.get("values", [])
+    if len(vals) <= n:
+        return None
+    recent, earlier = vals[-1], vals[-1 - n]
+    if earlier == 0:
+        return None
+    pct = (recent - earlier) / abs(earlier)
+    if pct > 0.05:
+        return "rising"
+    if pct < -0.05:
+        return "falling"
+    return "roughly flat"
+
+
 def rule_takeaways(series):
     items = []
 
     wti = get(series, "wti")
+    brent = get(series, "brent")
     if wti:
         r = pct_rank(wti)
-        items.append({"tag": "Energy", "text":
-            f"WTI is at ${wti['latest']:.2f}/bbl"
-            + (f", higher than {r}% of readings over the past five years" if r is not None else "")
-            + ". Oil remains the biggest swing factor for headline inflation and for input costs at transport-, logistics-, and manufacturing-exposed borrowers."})
+        tr = trend_word(wti)
+        t = f"WTI is at ${wti['latest']:.2f}/bbl"
+        if brent:
+            t += f" and Brent at ${brent['latest']:.2f}/bbl"
+        if r is not None:
+            t += f", which sits higher than {r}% of readings over the past five years"
+        if tr:
+            t += f", and the trend across recent observations is {tr}"
+        t += ". Energy is the single largest swing factor behind headline inflation volatility, which means it feeds directly into the Fed's reaction function and therefore into your base-rate assumptions."
+        t += " On the portfolio side, sustained moves here reset input costs for transport-, logistics-, chemicals- and manufacturing-exposed borrowers, and are worth stress-testing in any credit model that assumed energy costs stay near recent levels."
+        items.append({"tag": "Energy", "text": t})
 
     pay = get(series, "payrolls")
     un = get(series, "unemployment")
-    if pay:
-        vals = pay.get("values", [])
-        avg3 = sum(vals[-3:]) / min(3, len(vals)) if vals else None
-        t = f"Payrolls added {pay['latest']:+.0f}K in the latest report"
-        if avg3 is not None:
-            t += f" ({avg3:+.0f}K 3-month average)"
+    claims = get(series, "claims")
+    ahe = get(series, "ahe")
+    if pay or un:
+        t = ""
+        if pay:
+            vals = pay.get("values", [])
+            avg3 = sum(vals[-3:]) / min(3, len(vals)) if vals else None
+            t += f"Payrolls added {pay['latest']:+.0f}K in the latest report"
+            if avg3 is not None:
+                t += f", against a {avg3:+.0f}K average across the last three readings"
         if un:
-            t += f", with unemployment at {un['latest']:.1f}%"
-        t += ". Hiring momentum is the leading read on demand durability for growth-oriented credits."
+            t += (f", and unemployment stands at {un['latest']:.1f}%" if t else f"Unemployment stands at {un['latest']:.1f}%")
+        if claims:
+            t += f". Weekly initial claims are running near {claims['latest']/1000:.0f}K"
+        if ahe:
+            t += f", with average hourly earnings up {ahe['latest']:.1f}% year over year"
+        t += ". Hiring momentum is the most reliable leading read on demand durability for growth-oriented credits: payroll deceleration typically shows up in borrower topline growth and covenant headroom a quarter or two before it appears in the credit metrics themselves."
+        t += " Wage growth running above pre-pandemic norms also keeps services inflation sticky, which matters for labor-intensive issuers where payroll is the dominant variable cost."
         items.append({"tag": "Labor", "text": t})
 
     cpi = get(series, "cpiHeadline")
     core = get(series, "cpiCore")
     pce = get(series, "pceCore")
-    if cpi:
-        d = chg(cpi)
-        t = f"Headline CPI is running {cpi['latest']:.1f}% YoY"
-        if d is not None:
-            t += f" ({d:+.1f}pt vs the prior reading)"
+    ppi = get(series, "ppi")
+    if cpi or core or pce:
+        t = ""
+        if cpi:
+            d = chg(cpi)
+            t += f"Headline CPI is running {cpi['latest']:.1f}% year over year"
+            if d is not None:
+                t += f" ({d:+.1f}pt versus the prior reading)"
         if core:
-            t += f"; core CPI {core['latest']:.1f}%"
+            t += (f", with core CPI at {core['latest']:.1f}%" if t else f"Core CPI is {core['latest']:.1f}%")
         if pce:
-            t += f"; core PCE — the Fed's target metric — {pce['latest']:.1f}%"
-        t += ". The gap between headline volatility (energy) and sticky core is the key tension for the rate path."
+            t += f" and core PCE — the metric the FOMC actually targets — at {pce['latest']:.1f}%"
+        if ppi:
+            t += f". Producer prices are up {ppi['latest']:.1f}% year over year, the earliest read on what is coming at borrower input costs"
+        t += ". The central tension is the gap between volatile headline prints, which are largely energy-driven and mean-revert, and the stickier core measures that determine the policy path."
+        t += " For underwriting, the practical implication is to price to sticky rather than falling financing costs until core decelerates convincingly, and to watch pricing power closely at issuers absorbing input-cost inflation they cannot pass through."
         items.append({"tag": "Inflation", "text": t})
 
     ff = get(series, "fedfunds")
     curve = get(series, "curve")
-    if ff:
-        t = f"The Fed funds target stands at {ff['latest'] - 0.25:.2f}–{ff['latest']:.2f}%"
+    t10 = get(series, "ust10y")
+    t2 = get(series, "ust2y")
+    if ff or t10:
+        t = ""
+        if ff:
+            t += f"The Fed funds target stands at {ff['latest'] - 0.25:.2f}–{ff['latest']:.2f}%"
+        if t10:
+            t += (f", the 10-year Treasury at {t10['latest']:.2f}%" if t else f"The 10-year Treasury is at {t10['latest']:.2f}%")
+        if t2:
+            t += f" and the 2-year at {t2['latest']:.2f}%"
         if curve:
             bp = round(curve["latest"] * 100)
-            t += f", with the 10Y–2Y curve at {bp:+d}bp ({'normal upward slope' if bp > 0 else 'inverted'})"
-        t += ". Base-rate assumptions in every floating-rate underwriting case key off this."
-        items.append({"tag": "Policy", "text": t})
+            shape = "its normal upward slope" if bp > 0 else "inversion"
+            t += f". The 10Y-minus-2Y curve sits at {bp:+d}bp, holding {shape}"
+            t += (", which is generally constructive for credit: it is not pricing imminent recession and it widens the margin banks and direct lenders earn borrowing short and lending long."
+                  if bp > 0 else
+                  ", historically one of the more reliable recession warnings and a signal the market expects cuts in response to weaker growth.")
+        t += " The front end is your fastest read on repricing of hike-versus-cut odds around each CPI, PCE and jobs print, while the long end drives enterprise valuations and refinancing math."
+        t += " Every floating-rate structure in the book keys off the short end, so a persistent move here changes the cost-of-capital assumption underneath new originations mid-process."
+        items.append({"tag": "Policy & Rates", "text": t})
 
     hy = get(series, "hyoas")
     ig = get(series, "igoas")
-    if hy:
-        r = pct_rank(hy)
-        bp = round(hy["latest"] * 100)
-        t = f"HY OAS is {bp}bp"
-        if r is not None:
-            t += f" — tighter than {100 - r}% of the past five years" if r < 50 else f" — wider than {r}% of the past five years"
+    if hy or ig:
+        t = ""
+        if hy:
+            r = pct_rank(hy)
+            bp = round(hy["latest"] * 100)
+            t += f"High-yield OAS is {bp}bp"
+            if r is not None:
+                t += (f", tighter than {100 - r}% of the past five years" if r < 50
+                      else f", wider than {r}% of the past five years")
+            tr = trend_word(hy)
+            if tr:
+                t += f", and {tr} across recent observations"
         if ig:
-            t += f"; IG OAS {round(ig['latest'] * 100)}bp"
-        t += ". Spread levels this stretched relative to history are the cleanest single gauge of how much credit risk is being paid for."
+            t += (f". Investment-grade OAS is {round(ig['latest'] * 100)}bp" if t
+                  else f"Investment-grade OAS is {round(ig['latest'] * 100)}bp")
+        t += ". Index spreads are the cleanest market-priced gauge of how much you are actually being paid for credit risk."
+        t += " The pattern worth watching for special situations sourcing is compression at the index level masking widening dispersion underneath: idiosyncratic stress tends to surface in specific issuers — leveraged, tariff-exposed, or facing near-term maturities — well before the benchmark moves. That dispersion, not the index level, is where the opportunity set originates."
         items.append({"tag": "Credit", "text": t})
 
     gdp = get(series, "gdp")
     gnow = get(series, "gdpnow")
-    if gdp or gnow:
+    ism = get(series, "ismMfg")
+    if gdp or gnow or ism:
         t = ""
         if gdp:
             t += f"Real GDP grew {gdp['latest']:.1f}% (QoQ SAAR) in the most recent quarter"
         if gnow:
-            t += (" and the " if t else "The ") + f"Atlanta Fed's GDPNow is tracking {gnow['latest']:+.1f}% for the current quarter"
-        t += ". Below-trend-but-positive growth remains the base case supporting growth-oriented over distressed positioning."
+            t += ((" and the Atlanta Fed's GDPNow is tracking " if t else "The Atlanta Fed's GDPNow is tracking ")
+                  + f"{gnow['latest']:+.1f}% for the current quarter, an early read ahead of the official advance estimate")
+        if ism:
+            state = "expansion" if ism['latest'] >= 50 else "contraction"
+            t += f". ISM Manufacturing is at {ism['latest']:.1f}, indicating {state}"
+        t += ". Below-trend but positive growth is the backdrop that supports growth-oriented positioning over distressed or turnaround exposure."
+        t += " A material downside surprise would shift the opportunity set the other way, toward stressed and special situations, so the gap between the nowcast and the official print is worth tracking as an early warning rather than waiting on the lagging release."
         items.append({"tag": "Growth", "text": t})
 
     um = get(series, "umich")
     hs = get(series, "housingStarts")
     mort = get(series, "mortgage30y")
-    if um or hs:
+    sav = get(series, "saving")
+    if um or hs or mort:
         t = ""
         if um:
             r = pct_rank(um)
-            t += f"UMich consumer sentiment is {um['latest']:.1f}" + (f", lower than {100 - r}% of the past five years" if r is not None else "")
+            t += f"University of Michigan consumer sentiment is {um['latest']:.1f}"
+            if r is not None:
+                t += f", lower than {100 - r}% of readings over the past five years"
+        if sav:
+            t += (f", and the personal saving rate is {sav['latest']:.1f}%" if t
+                  else f"The personal saving rate is {sav['latest']:.1f}%")
         if hs:
-            t += ("; housing starts are " if t else "Housing starts are ") + f"{hs['latest'] / 1000:.2f}M SAAR"
+            t += (f". Housing starts are running {hs['latest']/1000:.2f}M SAAR" if t
+                  else f"Housing starts are running {hs['latest']/1000:.2f}M SAAR")
         if mort:
-            t += f" against a {mort['latest']:.2f}% 30Y mortgage rate"
-        t += ". The consumer and housing complex is the most rate-sensitive part of the demand picture."
+            t += f" against a {mort['latest']:.2f}% 30-year mortgage rate"
+        t += ". Housing and the consumer are the most rate-sensitive parts of the demand picture and typically the first to register policy tightening."
+        t += " A low saving rate means spending is running ahead of income growth, which is durable while labor income holds but drains quickly if payroll growth decelerates — worth tracking alongside the jobs data for consumer-facing and housing-cycle-exposed borrowers."
         items.append({"tag": "Consumer & Housing", "text": t})
 
     return items
@@ -417,13 +521,14 @@ def claude_enhance(series):
         with urllib.request.urlopen(req, timeout=120) as resp:
             payload = json.load(resp)
         text = "\n".join(b.get("text", "") for b in payload.get("content", []) if b.get("type") == "text")
+        text = strip_citations(text)
         m = re.search(r"\{[\s\S]*\}", text)
         if not m:
             raise ValueError("no JSON in response")
         parsed = json.loads(m.group(0))
         if not parsed.get("takeaways"):
             raise ValueError("no takeaways in response")
-        return parsed
+        return scrub(parsed)
     except Exception as e:
         print(f"Claude enhancement failed ({e}); using rule-based commentary.", file=sys.stderr)
         return None

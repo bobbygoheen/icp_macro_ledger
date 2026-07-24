@@ -98,6 +98,49 @@ function formatDelta(key, latest, prev) {
   return `${text} ${f.period || ""}`.trim();
 }
 
+// Defensive cleanup: web-search-backed commentary can arrive wrapped in
+// citation markup like <cite index="2-1">...</cite>, which would otherwise
+// render as literal text in the cards. The generator strips these too, but
+// doing it here as well means any data.json already committed is cleaned on
+// load without waiting for the next refresh.
+// Tracks a narrow viewport so layout/padding/typography can adapt. Inline
+// styles can't use media queries, so this drives the responsive decisions.
+function useIsMobile(breakpoint = 640) {
+  const [isMobile, setIsMobile] = useState(
+    typeof window !== "undefined" ? window.innerWidth <= breakpoint : false
+  );
+  useEffect(() => {
+    function onResize() {
+      setIsMobile(window.innerWidth <= breakpoint);
+    }
+    window.addEventListener("resize", onResize);
+    onResize();
+    return () => window.removeEventListener("resize", onResize);
+  }, [breakpoint]);
+  return isMobile;
+}
+
+function stripCitations(text) {
+  if (typeof text !== "string") return text;
+  return text
+    .replace(/<\/?cite[^>]*>/gi, "")
+    .replace(/\s*index\s*=\s*["'][^"']*["']/gi, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+function scrubDeep(obj) {
+  if (typeof obj === "string") return stripCitations(obj);
+  if (Array.isArray(obj)) return obj.map(scrubDeep);
+  if (obj && typeof obj === "object") {
+    const out = {};
+    Object.keys(obj).forEach((k) => {
+      out[k] = scrubDeep(obj[k]);
+    });
+    return out;
+  }
+  return obj;
+}
+
 function shortDateLabel(iso) {
   // "2024-03-01" -> "Mar '24"
   const [y, m] = iso.split("-");
@@ -188,7 +231,7 @@ function useLiveData() {
       if (Object.keys(nd).length === 0) throw new Error("No usable series in data.json");
       // Non-FRED values fetched by the commentary generator (ECB, China PMI,
       // ISM Services, retail sales, existing home sales) arrive pre-formatted.
-      const extra = payload.extraSeries || {};
+      const extra = scrubDeep(payload.extraSeries || {});
       Object.keys(extra).forEach((key) => {
         const e = extra[key];
         if (e && e.value && !nd[key]) {
@@ -196,14 +239,14 @@ function useLiveData() {
         }
       });
       setLiveData(nd);
-      setCommentary(payload.commentary || null);
+      setCommentary(scrubDeep(payload.commentary) || null);
       setReleases(payload.releases || {});
-      setThemes(payload.themes || null);
-      setThemeCards(payload.themeCards || null);
+      setThemes(scrubDeep(payload.themes) || null);
+      setThemeCards(scrubDeep(payload.themeCards) || null);
       setCalendar(payload.calendar || null);
-      setRegime(payload.regime || null);
+      setRegime(scrubDeep(payload.regime) || null);
       setConsensus(payload.consensus || null);
-      setSurprises(payload.surprises || null);
+      setSurprises(scrubDeep(payload.surprises) || null);
       setPrevRun(payload.prevRun || null);
       setSeriesRaw(series);
       setAsOfLive(payload.updated || null);
@@ -396,7 +439,7 @@ function Sparkline({ data, labels, color = C.gold, valueSample }) {
   );
 }
 
-function MetricCard({ m, live }) {
+function MetricCard({ m, live, isMobile }) {
   const liveEntry = m.liveKey ? live.liveData[m.liveKey] : null;
   const value = liveEntry?.value || m.value;
   const delta = liveEntry?.delta || m.delta;
@@ -419,7 +462,7 @@ function MetricCard({ m, live }) {
         background: C.panel,
         border: `1px solid ${isLive ? C.goldDim : C.line}`,
         borderRadius: 6,
-        padding: "15px 17px",
+        padding: isMobile ? "14px 13px" : "15px 17px",
         display: "flex",
         flexDirection: "column",
       }}
@@ -480,16 +523,16 @@ function MetricCard({ m, live }) {
   );
 }
 
-function SectionHeader({ title, note }) {
+function SectionHeader({ title, note, isMobile }) {
   return (
-    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "36px 0 14px", flexWrap: "wrap", gap: 6 }}>
+    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: isMobile ? "28px 0 12px" : "36px 0 14px", flexWrap: "wrap", gap: 6 }}>
       <h2 style={{ fontFamily: serif, fontSize: 19, color: C.ink, margin: 0, fontWeight: 500, letterSpacing: 0.2 }}>{title}</h2>
       {note && <span style={{ fontFamily: sans, fontSize: 11.5, color: C.inkFaint, fontStyle: "italic" }}>{note}</span>}
     </div>
   );
 }
 
-function CreditGauge({ live }) {
+function CreditGauge({ live, isMobile }) {
   const min = 250, max = 900;
   const liveEntry = live.liveData.hyoas;
   const current = liveEntry ? parseFloat(String(liveEntry.value).replace(/[^0-9.]/g, "")) : 269;
@@ -501,7 +544,7 @@ function CreditGauge({ live }) {
     pctile = Math.round((100 * below) / liveEntry.history.length);
   }
   return (
-    <div style={{ background: C.panelAlt, border: `1px solid ${C.line}`, borderRadius: 6, padding: "20px 22px" }}>
+    <div style={{ background: C.panelAlt, border: `1px solid ${C.line}`, borderRadius: 6, padding: isMobile ? "16px 14px" : "20px 22px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 6 }}>
         <div style={{ fontFamily: sans, fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", color: C.inkFaint }}>
           Credit Cycle Gauge — HY OAS (ICE BofA)
@@ -606,7 +649,7 @@ function LiveStatusBar({ live }) {
   );
 }
 
-function Takeaways({ live }) {
+function Takeaways({ live, isMobile }) {
   const fallbackItems = [
     {
       tag: "Energy",
@@ -653,7 +696,7 @@ function Takeaways({ live }) {
       ? `Computed ${live.commentary.generated} from the latest data`
       : "Reviewed editorial snapshot";
   return (
-    <div style={{ background: C.panelAlt, border: `1px solid ${C.line}`, borderRadius: 6, padding: "22px 24px", marginTop: 24 }}>
+    <div style={{ background: C.panelAlt, border: `1px solid ${C.line}`, borderRadius: 6, padding: isMobile ? "16px 14px" : "22px 24px", marginTop: isMobile ? 12 : 24 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
         <div style={{ fontFamily: sans, fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", color: C.inkFaint }}>
           This Week's Read — What Actually Matters
@@ -662,8 +705,8 @@ function Takeaways({ live }) {
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         {items.map((it) => (
-          <div key={it.tag} style={{ display: "flex", gap: 14 }}>
-            <div style={{ minWidth: 108, flexShrink: 0 }}>
+          <div key={it.tag} style={{ display: "flex", flexDirection: isMobile ? "column" : "row", gap: isMobile ? 2 : 14 }}>
+            <div style={{ minWidth: isMobile ? "auto" : 108, flexShrink: 0, marginBottom: isMobile ? 2 : 0 }}>
               <span style={{ fontFamily: mono, fontSize: 10.5, color: C.gold, letterSpacing: 0.5, textTransform: "uppercase" }}>{it.tag}</span>
             </div>
             <div style={{ fontFamily: sans, fontSize: 13, lineHeight: 1.55, color: C.ink }}>{it.text}</div>
@@ -1269,35 +1312,53 @@ const IMPACT_STYLE = {
   med: { fg: C.gold, label: "Med" },
   low: { fg: C.inkFaint, label: "Low" },
 };
-function CalendarStrip({ live }) {
+function CalendarStrip({ live, isMobile }) {
   const cal = live.calendar;
   if (!cal || cal.length === 0) return null;
-  const consensus = live.consensus || {};
   const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
   return (
-    <div style={{ background: C.panelAlt, border: `1px solid ${C.line}`, borderRadius: 6, padding: "20px 22px", marginTop: 12 }}>
-      <div style={{ fontFamily: sans, fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", color: C.inkFaint, marginBottom: 14 }}>
+    <div
+      style={{
+        background: C.panelAlt,
+        border: `1px solid ${C.line}`,
+        borderRadius: 6,
+        padding: isMobile ? "16px 14px" : "20px 22px",
+        marginTop: 12,
+      }}
+    >
+      <div style={{ fontFamily: sans, fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", color: C.inkFaint }}>
         Upcoming Releases — Next 3 Weeks
+      </div>
+      <div style={{ fontFamily: sans, fontSize: 11.5, color: C.inkFaint, marginTop: 4, marginBottom: 14, fontStyle: "italic" }}>
+        High / Med / Low indicates how much a release typically moves rates and credit spreads
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         {cal.map((e, i) => {
           const imp = IMPACT_STYLE[e.impact] || IMPACT_STYLE.low;
           const d = new Date(e.date + "T00:00:00");
           const dow = names[d.getDay()];
-          const exp = e.consensusKey && consensus[e.consensusKey];
           return (
             <div
               key={i}
               style={{
                 display: "flex",
                 alignItems: "baseline",
-                gap: 12,
+                gap: isMobile ? 8 : 12,
                 padding: "8px 0",
                 borderBottom: i < cal.length - 1 ? `1px solid ${C.line}` : "none",
+                flexWrap: "wrap",
               }}
             >
-              <span style={{ fontFamily: mono, fontSize: 11, color: C.ink, minWidth: 92, flexShrink: 0 }}>
+              <span
+                style={{
+                  fontFamily: mono,
+                  fontSize: isMobile ? 10.5 : 11,
+                  color: C.ink,
+                  minWidth: isMobile ? 82 : 92,
+                  flexShrink: 0,
+                }}
+              >
                 {dow} {e.display}
               </span>
               <span
@@ -1316,22 +1377,25 @@ function CalendarStrip({ live }) {
               >
                 {imp.label}
               </span>
-              <span style={{ fontFamily: sans, fontSize: 12.5, color: C.inkDim, flex: 1 }}>{e.label}</span>
-              {exp && (
-                <span style={{ fontFamily: mono, fontSize: 10.5, color: C.blue, flexShrink: 0 }}>exp: {exp}</span>
-              )}
+              <span
+                style={{
+                  fontFamily: sans,
+                  fontSize: isMobile ? 12 : 12.5,
+                  color: C.inkDim,
+                  flex: 1,
+                  minWidth: isMobile ? "100%" : 0,
+                }}
+              >
+                {e.label}
+              </span>
             </div>
           );
         })}
       </div>
-      {Object.keys(consensus).length === 0 && (
-        <div style={{ fontFamily: sans, fontSize: 10.5, color: C.inkFaint, marginTop: 10, fontStyle: "italic" }}>
-          Consensus expectations appear here when enhanced commentary is configured.
-        </div>
-      )}
     </div>
   );
 }
+
 
 // #2 — "What changed": biggest movers since the previous refresh (falls back
 // to latest-vs-prior-observation when no prior-run snapshot exists), plus any
@@ -1347,7 +1411,7 @@ const MOVER_LABELS = {
 // claims, mortgage, vol) so up=red. For a few, a rise is favorable
 // (sentiment, payrolls) so up=green. Matches the per-card colors below.
 const MOVER_UP_IS_GOOD = { umich: true, payrolls: true, curve: true };
-function WhatChanged({ live }) {
+function WhatChanged({ live, isMobile }) {
   const series = live.seriesRaw;
   if (!series) return null;
   const prev = live.prevRun || {};
@@ -1380,7 +1444,7 @@ function WhatChanged({ live }) {
   const anyCrossRun = top.some((m) => m.changed);
 
   return (
-    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 6, padding: "16px 18px", marginTop: 12 }}>
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 6, padding: isMobile ? "14px" : "16px 18px", marginTop: 12 }}>
       <div style={{ fontFamily: sans, fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", color: C.inkFaint, marginBottom: 12 }}>
         {anyCrossRun ? "What Moved Since Last Refresh" : "Notable Moves in the Latest Data"}
       </div>
@@ -1437,17 +1501,18 @@ function WhatChanged({ live }) {
 
 function Dashboard() {
   const live = useLiveData();
+  const isMobile = useIsMobile();
   const staticAsOf = "July 16, 2026";
 
   return (
     <div style={{ background: C.bg, minHeight: "100vh", padding: "0", fontFamily: sans }}>
-      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "40px 24px 80px" }}>
+      <div style={{ maxWidth: 1080, margin: "0 auto", padding: isMobile ? "24px 14px 60px" : "40px 24px 80px" }}>
         {/* Header */}
         <div style={{ borderBottom: `1px solid ${C.line}`, paddingBottom: 20, marginBottom: 8 }}>
           <div style={{ fontFamily: mono, fontSize: 11, color: C.goldDim, letterSpacing: 1.2, textTransform: "uppercase" }}>
             Special Situations Credit — Macro Brief
           </div>
-          <h1 style={{ fontFamily: serif, fontSize: 34, color: C.ink, margin: "6px 0 4px", fontWeight: 500 }}>
+          <h1 style={{ fontFamily: serif, fontSize: isMobile ? 26 : 34, color: C.ink, margin: "6px 0 4px", fontWeight: 500 }}>
             The ICP Macro Ledger
           </h1>
           <div style={{ fontFamily: sans, fontSize: 13, color: C.inkDim }}>
@@ -1457,18 +1522,18 @@ function Dashboard() {
           </div>
         </div>
 
-        <RegimeBanner live={live} />
-
         <LiveStatusBar live={live} />
 
-        <WhatChanged live={live} />
+        <RegimeBanner live={live} />
 
-        <CalendarStrip live={live} />
+        <Takeaways live={live} isMobile={isMobile} />
 
-        <Takeaways live={live} />
+        <WhatChanged live={live} isMobile={isMobile} />
+
+        <CalendarStrip live={live} isMobile={isMobile} />
 
         <div style={{ marginTop: 24 }}>
-          <CreditGauge live={live} />
+          <CreditGauge live={live} isMobile={isMobile} />
         </div>
 
         {sections.map((sec) => {
@@ -1498,10 +1563,10 @@ function Dashboard() {
               : sec.note;
           return (
             <div key={sec.title}>
-              <SectionHeader title={sec.title} note={note} />
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12 }}>
+              <SectionHeader title={sec.title} note={note} isMobile={isMobile} />
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(340px, 100%), 1fr))", gap: 12 }}>
                 {metrics.map((m) => (
-                  <MetricCard key={sec.title + m.label} m={m} live={live} />
+                  <MetricCard key={sec.title + m.label} m={m} live={live} isMobile={isMobile} />
                 ))}
               </div>
             </div>
