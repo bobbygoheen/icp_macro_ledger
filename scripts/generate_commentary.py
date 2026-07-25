@@ -475,14 +475,16 @@ Do the following, using web search where needed (max 5 searches):
 4. For the next few high-impact US releases (CPI, Payrolls, Core PCE, PPI, Retail Sales, ISM Mfg, ISM Services, GDP as applicable), give the current market consensus expectation. Use these exact labels as keys: "CPI", "Payrolls", "PCE", "PPI", "Retail Sales", "ISM Mfg", "ISM Services", "GDP".
 5. For any of those indicators that printed in the LAST ~10 DAYS, give the actual vs. consensus surprise.
 6. Write a one-line macro-regime summary (a phase label plus a short clause), e.g. "Late-cycle — tight spreads, cooling labor, sticky core inflation."
-7. Some official series are published to FRED on a delay. Find the MOST RECENT published reading (preliminary is fine) for each of these, with the month it refers to and whether it is prelim or final. Only include one if you are confident in the number from a reputable source (a news report of the official release is fine); omit any you cannot verify. Values:
-   - "umich" = University of Michigan Consumer Sentiment headline index (roughly 40-110)
+7. LATEST DELAYED RELEASES — this is important, be precise. Some official series publish to FRED on a delay, so our stored data is one or more months behind. Here is exactly how far our data currently goes for each:
+{fred_status}
+For each series below, search the web for the SINGLE MOST RECENT published reading available as of {today}, and return it ONLY IF it is for a MONTH NEWER than what we already have above (a later calendar month; a preliminary reading counts). If the newest available reading is the same month we already have, OMIT that series — do NOT return an older or equal month just to fill it in. Report the exact reference month (YYYY-MM) the reading is FOR, not its release date. Values to find:
+   - "umich" = University of Michigan Consumer Sentiment headline index (roughly 40-110). Its preliminary reading for the current month is released mid-month — return that.
    - "existingHome" = US existing home sales, millions SAAR (roughly 3.0-6.5)
    - "pceHeadline" = headline PCE inflation, YoY % (e.g. 3.4)
    - "pceCore" = core PCE inflation, YoY % (e.g. 3.1)
    - "saving" = US personal saving rate, % (e.g. 4.5)
    - "retailYoY" = US retail & food services sales EX motor vehicles, YoY % (e.g. 4.2). Report year-over-year percent, not month-over-month.
-   - "ismMfg" = ISM Manufacturing PMI headline (roughly 40-65). The official ISM number is not on FRED, so this news-sourced value is the only way to keep it current.
+   - "ismMfg" = ISM Manufacturing PMI headline (roughly 40-65). Not on FRED at all, so always return the latest you can find.
 
 Respond with ONLY this JSON (no markdown fences, no other text). Ensure it is strictly valid JSON: double-quote all keys and string values, no trailing commas, no comments, and escape any double quotes that appear inside string values:
 {{"takeaways":[{{"tag":"Energy","text":"..."}}],
@@ -569,7 +571,28 @@ def claude_enhance(series):
         if s.get("latest") is not None:
             summary[k] = {"latest": s["latest"], "prev": s["prev"], "date": s.get("latestDate")}
 
-    prompt = CLAUDE_PROMPT_TEMPLATE.format(today=TODAY.isoformat(), summary=json.dumps(summary))
+    # Tell the model exactly which month FRED already has for each delayed
+    # series, so it knows it must return something NEWER than that rather than
+    # defaulting to a month FRED already covers.
+    have_lines = []
+    labels = {
+        "umich": "University of Michigan Consumer Sentiment",
+        "existingHome": "Existing Home Sales",
+        "pceHeadline": "Headline PCE inflation (YoY)",
+        "pceCore": "Core PCE inflation (YoY)",
+        "saving": "Personal Saving Rate",
+        "retailYoY": "Retail Sales ex-autos (YoY)",
+        "ismMfg": "ISM Manufacturing PMI",
+    }
+    for k, lbl in labels.items():
+        s = series.get(k)
+        have = s.get("latestDate", "none")[:7] if s and s.get("latestDate") else "none (not on FRED)"
+        have_lines.append(f"  - {lbl} ({k}): our data currently goes through {have}")
+    fred_status = "\n".join(have_lines)
+
+    prompt = CLAUDE_PROMPT_TEMPLATE.format(
+        today=TODAY.isoformat(), summary=json.dumps(summary), fred_status=fred_status
+    )
     body = json.dumps({
         # Current cost-effective model for this task (verified against
         # docs.claude.com). Haiku 4.5 is the cheapest capable option and
