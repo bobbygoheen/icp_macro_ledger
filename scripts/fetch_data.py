@@ -32,6 +32,7 @@ SERIES = {
     "curve":        ("T10Y2Y",           "level"),  # 10Y minus 2Y spread, %, daily
     "hyoas":        ("BAMLH0A0HYM2",     "level"),  # ICE BofA HY OAS, %, daily
     "igoas":        ("BAMLC0A0CM",       "level"),  # ICE BofA IG Corp OAS, %, daily
+    "cccoas":       ("BAMLH0A3HYC",      "level"),  # ICE BofA CCC & Lower HY OAS, %, daily
     "fedfunds":     ("DFEDTARU",         "level"),  # Fed funds target upper bound, %, daily
     "cpiHeadline":  ("CPIAUCSL",         "yoy"),    # CPI, index -> YoY %
     "cpiCore":      ("CPILFESL",         "yoy"),    # Core CPI, index -> YoY %
@@ -44,6 +45,7 @@ SERIES = {
     "claims":       ("ICSA",             "level"),  # Initial claims, weekly (persons)
     "umich":        ("UMCSENT",          "level"),  # UMich sentiment, monthly
     "saving":       ("PSAVERT",          "level"),  # Personal saving rate, %, monthly
+    "retailYoY":    ("RSFSXMV",          "yoy"),    # Retail & food services ex-motor-vehicle -> YoY %
     "mortgage30y":  ("MORTGAGE30US",     "level"),  # 30Y mortgage rate, %, weekly
     "housingStarts":("HOUST",            "level"),  # Housing starts, thousands SAAR, monthly
     "existingHome": ("EXHOSLUSM495S",    "level"),  # Existing home sales, SAAR, monthly (may be restricted; skipped if so)

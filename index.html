@@ -56,6 +56,8 @@ const FORMATS = {
   curve:         { histScale: 100, fmt: (v) => `${v >= 0 ? "+" : ""}${Math.round(v * 100)}bp`, deltaBp: true, period: "vs prior day" },
   hyoas:         { histScale: 100, fmt: (v) => `${Math.round(v * 100)}bp`, deltaBp: true, period: "vs prior day" },
   igoas:         { histScale: 100, fmt: (v) => `${Math.round(v * 100)}bp`, deltaBp: true, period: "vs prior day" },
+  cccoas:        { histScale: 100, fmt: (v) => `${Math.round(v * 100)}bp`, deltaBp: true, period: "vs prior day" },
+  retailYoY:     { fmt: (v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`, deltaPt: true, period: "vs prior month (YoY)" },
   fedfunds:      { fmt: (v) => `${(v - 0.25).toFixed(2)}–${v.toFixed(2)}%`, deltaBp: true, period: "vs prior day" },
   cpiHeadline:   { fmt: (v) => `${v.toFixed(1)}%`, deltaPt: true, period: "vs prior month (YoY)" },
   cpiCore:       { fmt: (v) => `${v.toFixed(1)}%`, deltaPt: true, period: "vs prior month (YoY)" },
@@ -195,6 +197,9 @@ function computeContext(key, s) {
   } else if (key === "umich") {
     // No fresh point appended this run — FRED's UMich copy lags 1 month by design.
     line += " · FRED copy is delayed 1 month by the source";
+  } else if (key === "ismMfg") {
+    // ISM's official PMI isn't on FRED at all; live value only via news append.
+    line += " · ISM PMI isn't on FRED; latest comes from the news feed when available";
   }
   return line;
 }
@@ -1057,18 +1062,20 @@ const sections = [
           "Despite the bounce, sentiment remains near the lowest levels on record for this survey (since 1978), with year-ahead inflation expectations still elevated at 4.6%. For consumer-facing borrowers in the portfolio, this is a caution flag on discretionary demand even as hard spending data holds up better than sentiment implies.",
       },
       {
-        label: "Retail Sales (ex-auto, ex-gas, m/m)",
-        liveKey: "retailSales",
+        label: "Retail Sales ex-Autos (YoY)",
+        liveKey: "retailYoY",
         releaseKey: "retail",
-        value: "~flat",
-        delta: "June print",
-        dir: "flat",
-        prior: "May: retail sales +0.9% m/m, +6.9% YoY; June consensus was -0.2% headline as gasoline comps faded. Chart shows annual YoY growth, not the monthly figure, for a readable 5-year trend",
+        value: "6.9%",
+        delta: "",
+        dir: "up",
+        prior: "Retail & food services ex motor vehicles, year-over-year",
         nextDate: "Aug 14",
+        upColor: C.green,
+        downColor: C.red,
         history: [18, 9, 3, 3, 4, 6.9],
-        historyLabels: ["2021 YoY", "May '26 YoY"],
+        historyLabels: ["2021 YoY", "recent"],
         relevance:
-          "Retail sales feed directly into GDP's consumer spending component and are the most current read on whether the resilient-consumer narrative is cracking. A miss here alongside the June payrolls miss would meaningfully raise the odds markets price in a September Fed cut instead of a hike.",
+          "Retail sales feed directly into GDP's consumer spending component and are the most current read on whether the resilient-consumer narrative is cracking. Sustained deceleration here, alongside softening payrolls, is what would shift the Fed toward cuts and signal demand risk at consumer-facing borrowers.",
       },
       {
         label: "Personal Saving Rate",
@@ -1261,6 +1268,19 @@ const sections = [
         historyLabels: ["2021", "Jul '26"],
         relevance:
           "Investment-grade spread compression this extreme signals strong technical demand (AI-capex-driven issuance notwithstanding) rather than genuinely improving credit quality — a reminder that all-in yields look attractive mainly because Treasury yields are elevated, not because you're being paid much for risk.",
+      },
+      {
+        label: "CCC & Lower OAS (ICE BofA)",
+        liveKey: "cccoas",
+        value: "—",
+        delta: "",
+        dir: "flat",
+        prior: "ICE BofA US CCC & Lower High Yield Index option-adjusted spread",
+        nextDate: "Daily",
+        history: [700, 650, 1050, 900, 780, 720, 640, 820, 700, 650],
+        historyLabels: ["2021", "recent"],
+        relevance:
+          "The lowest-quality tier of the high-yield market and the most sensitive gauge of distress appetite — the CCC-versus-BB or CCC-versus-HY spread is a cleaner read on where the market is actually pricing default risk than the blended index. Widening at the CCC end while the broad HY index stays calm is exactly the dispersion signal that flags special-situations opportunity, so this is arguably the single most mandate-relevant spread on the dashboard.",
       },
       {
         label: "Leveraged Loan / Direct Lending Backdrop",

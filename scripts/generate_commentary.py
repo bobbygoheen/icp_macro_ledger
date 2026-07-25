@@ -475,7 +475,14 @@ Do the following, using web search where needed (max 5 searches):
 4. For the next few high-impact US releases (CPI, Payrolls, Core PCE, PPI, Retail Sales, ISM Mfg, ISM Services, GDP as applicable), give the current market consensus expectation. Use these exact labels as keys: "CPI", "Payrolls", "PCE", "PPI", "Retail Sales", "ISM Mfg", "ISM Services", "GDP".
 5. For any of those indicators that printed in the LAST ~10 DAYS, give the actual vs. consensus surprise.
 6. Write a one-line macro-regime summary (a phase label plus a short clause), e.g. "Late-cycle — tight spreads, cooling labor, sticky core inflation."
-7. Some official series are published to FRED on a delay. Find the MOST RECENT published reading (preliminary is fine) for each of these, with the month it refers to and whether it is prelim or final. Only include one if you are confident in the number from a reputable source (a news report of the official release is fine). "umich" = University of Michigan Consumer Sentiment headline index (a number roughly 40-110). "existingHome" = US existing home sales in millions, seasonally-adjusted annual rate (a number roughly 3.0-6.5). Omit any you cannot verify.
+7. Some official series are published to FRED on a delay. Find the MOST RECENT published reading (preliminary is fine) for each of these, with the month it refers to and whether it is prelim or final. Only include one if you are confident in the number from a reputable source (a news report of the official release is fine); omit any you cannot verify. Values:
+   - "umich" = University of Michigan Consumer Sentiment headline index (roughly 40-110)
+   - "existingHome" = US existing home sales, millions SAAR (roughly 3.0-6.5)
+   - "pceHeadline" = headline PCE inflation, YoY % (e.g. 3.4)
+   - "pceCore" = core PCE inflation, YoY % (e.g. 3.1)
+   - "saving" = US personal saving rate, % (e.g. 4.5)
+   - "retailYoY" = US retail & food services sales EX motor vehicles, YoY % (e.g. 4.2). Report year-over-year percent, not month-over-month.
+   - "ismMfg" = ISM Manufacturing PMI headline (roughly 40-65). The official ISM number is not on FRED, so this news-sourced value is the only way to keep it current.
 
 Respond with ONLY this JSON (no markdown fences, no other text):
 {{"takeaways":[{{"tag":"Energy","text":"..."}}],
@@ -484,7 +491,7 @@ Respond with ONLY this JSON (no markdown fences, no other text):
 "consensus":{{"CPI":"3.4% YoY exp","Payrolls":"+80K exp"}},
 "surprises":[{{"label":"CPI","actual":"3.5%","consensus":"3.4%","dir":"up"}}],
 "regime":{{"label":"Late-cycle","detail":"tight spreads, cooling labor, sticky core inflation"}},
-"freshPoints":{{"umich":{{"value":51.2,"month":"2026-07","kind":"prelim"}},"existingHome":{{"value":4.02,"month":"2026-06","kind":"final"}}}}}}"""
+"freshPoints":{{"umich":{{"value":51.2,"month":"2026-07","kind":"prelim"}},"pceHeadline":{{"value":4.1,"month":"2026-06","kind":"final"}},"pceCore":{{"value":3.4,"month":"2026-06","kind":"final"}},"saving":{{"value":4.2,"month":"2026-06","kind":"final"}},"retailYoY":{{"value":4.5,"month":"2026-06","kind":"final"}},"ismMfg":{{"value":49.0,"month":"2026-07","kind":"final"}}}}}}"""
 
 
 def claude_enhance(series):
@@ -542,8 +549,13 @@ def claude_enhance(series):
 # worth appending. "scale" converts the reported unit into the FRED unit;
 # "lo"/"hi" bound a sane value for validation (reject anything outside).
 FRESH_POINT_SPEC = {
-    "umich":       {"scale": 1,         "lo": 30,  "hi": 120},   # sentiment index
-    "existingHome": {"scale": 1_000_000, "lo": 2.5, "hi": 7.5},  # millions SAAR -> units
+    "umich":        {"scale": 1,         "lo": 30,   "hi": 120},   # sentiment index
+    "existingHome": {"scale": 1_000_000, "lo": 2.5,  "hi": 7.5},   # millions SAAR -> units
+    "pceHeadline":  {"scale": 1,         "lo": -2.0, "hi": 12.0},  # YoY %
+    "pceCore":      {"scale": 1,         "lo": -2.0, "hi": 12.0},  # YoY %
+    "saving":       {"scale": 1,         "lo": 0.0,  "hi": 20.0},  # %
+    "retailYoY":    {"scale": 1,         "lo": -20.0, "hi": 25.0}, # retail sales YoY %
+    "ismMfg":       {"scale": 1,         "lo": 35.0, "hi": 70.0},  # ISM Mfg PMI (FRED copy frozen)
 }
 
 
