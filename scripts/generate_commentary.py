@@ -484,7 +484,7 @@ Do the following, using web search where needed (max 5 searches):
    - "retailYoY" = US retail & food services sales EX motor vehicles, YoY % (e.g. 4.2). Report year-over-year percent, not month-over-month.
    - "ismMfg" = ISM Manufacturing PMI headline (roughly 40-65). The official ISM number is not on FRED, so this news-sourced value is the only way to keep it current.
 
-Respond with ONLY this JSON (no markdown fences, no other text):
+Respond with ONLY this JSON (no markdown fences, no other text). Ensure it is strictly valid JSON: double-quote all keys and string values, no trailing commas, no comments, and escape any double quotes that appear inside string values:
 {{"takeaways":[{{"tag":"Energy","text":"..."}}],
 "extraSeries":{{"ecb":{{"value":"N.NN%","delta":"context","dir":"up|down|flat"}},"chinaPMI":{{"value":"NN.N","delta":"context","dir":"up|down|flat"}},"ismServices":{{"value":"NN.N","delta":"context","dir":"up|down|flat"}},"retailSales":{{"value":"+N.N% m/m","delta":"context","dir":"up|down|flat"}},"existingHome":{{"value":"N.NNM","delta":"context","dir":"up|down|flat"}}}},
 "themeCards":[{{"title":"3-6 word title","value":"Elevated","dir":"up|down|flat","statusLine":"1-2 sentence current situation","relevance":"1-2 sentences on why it matters for special situations credit"}}],
@@ -492,6 +492,71 @@ Respond with ONLY this JSON (no markdown fences, no other text):
 "surprises":[{{"label":"CPI","actual":"3.5%","consensus":"3.4%","dir":"up"}}],
 "regime":{{"label":"Late-cycle","detail":"tight spreads, cooling labor, sticky core inflation"}},
 "freshPoints":{{"umich":{{"value":51.2,"month":"2026-07","kind":"prelim"}},"pceHeadline":{{"value":4.1,"month":"2026-06","kind":"final"}},"pceCore":{{"value":3.4,"month":"2026-06","kind":"final"}},"saving":{{"value":4.2,"month":"2026-06","kind":"final"}},"retailYoY":{{"value":4.5,"month":"2026-06","kind":"final"}},"ismMfg":{{"value":49.0,"month":"2026-07","kind":"final"}}}}}}"""
+
+
+def _repair_json(s):
+    """Fix the most common ways LLM JSON breaks, without changing meaning."""
+    s = re.sub(r",\s*([}\]])", r"\1", s)   # trailing commas before } or ]
+    s = re.sub(r",\s*,+", ",", s)           # doubled commas
+    s = s.replace("\u201c", '"').replace("\u201d", '"')  # smart double quotes
+    s = s.replace("\u2018", "'").replace("\u2019", "'")  # smart single quotes
+    return s
+
+
+def _salvage_top_level(s):
+    """Parse each top-level key independently so one malformed field doesn't
+    discard the whole payload. Returns whatever parsed successfully."""
+    out = {}
+    start, end = s.find("{"), s.rfind("}")
+    if start < 0 or end <= start:
+        return out
+    body = s[start + 1:end]
+    i, n = 0, len(body)
+    while i < n:
+        km = re.search(r'"((?:[^"\\]|\\.)*)"\s*:', body[i:])
+        if not km:
+            break
+        key = km.group(1)
+        vstart = i + km.end()
+        depth, instr, esc, j = 0, False, False, vstart
+        while j < n:
+            c = body[j]
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                instr = not instr
+            elif not instr:
+                if c in "{[":
+                    depth += 1
+                elif c in "}]":
+                    depth -= 1
+                elif c == "," and depth == 0:
+                    break
+            j += 1
+        raw_val = body[vstart:j].strip()
+        for candidate in (raw_val, _repair_json(raw_val)):
+            try:
+                out[key] = json.loads(candidate)
+                break
+            except Exception:
+                continue
+        i = j + 1
+    return out
+
+
+def parse_lenient(s):
+    """Strict parse, then repaired parse, then per-key salvage."""
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    try:
+        return json.loads(_repair_json(s))
+    except Exception:
+        pass
+    return _salvage_top_level(s) or None
 
 
 def claude_enhance(series):
@@ -512,7 +577,7 @@ def claude_enhance(series):
         # "claude-sonnet-5" for richer commentary at higher cost. Always
         # verify the current string at docs.claude.com before changing.
         "model": "claude-haiku-4-5",
-        "max_tokens": 2500,
+        "max_tokens": 4000,
         "messages": [{"role": "user", "content": prompt}],
         "tools": [{"type": "web_search_20250305", "name": "web_search"}],
     }).encode()
@@ -534,8 +599,8 @@ def claude_enhance(series):
         m = re.search(r"\{[\s\S]*\}", text)
         if not m:
             raise ValueError("no JSON in response")
-        parsed = json.loads(m.group(0))
-        if not parsed.get("takeaways"):
+        parsed = parse_lenient(m.group(0))
+        if not parsed or not parsed.get("takeaways"):
             raise ValueError("no takeaways in response")
         return scrub(parsed)
     except Exception as e:
