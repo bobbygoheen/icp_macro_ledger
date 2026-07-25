@@ -642,39 +642,57 @@ def apply_fresh_points(series, fresh):
     provisional so the frontend can mark it distinctly.
     """
     if not isinstance(fresh, dict):
+        print("  freshPoints: none returned by the model", file=sys.stderr)
         return 0
     applied = 0
     for key, spec in FRESH_POINT_SPEC.items():
         fp = fresh.get(key)
+        if not fp:
+            continue  # model didn't return this one; that's fine
         s = series.get(key)
-        if not fp or not s or "values" not in s or "dates" not in s:
+        if not s or "values" not in s or "dates" not in s:
+            print(f"  fresh point {key} skipped: base FRED series not present this run", file=sys.stderr)
             continue
         try:
             raw = float(fp.get("value"))
         except (TypeError, ValueError):
+            print(f"  fresh point {key} skipped: non-numeric value {fp.get('value')!r}", file=sys.stderr)
             continue
         if not (spec["lo"] <= raw <= spec["hi"]):
-            print(f"  fresh point for {key} rejected: {raw} out of range", file=sys.stderr)
+            print(f"  fresh point {key} rejected: {raw} out of range [{spec['lo']},{spec['hi']}]", file=sys.stderr)
             continue
         month = _norm_month(fp.get("month") or fp.get("date") or "")
         if not month:
+            print(f"  fresh point {key} skipped: unparseable month {fp.get('month') or fp.get('date')!r}", file=sys.stderr)
             continue
-        # Only append if strictly newer than FRED's latest observation.
-        if s["dates"] and month <= s["dates"][-1]:
-            continue
+        fred_latest = s["dates"][-1] if s["dates"] else None
         value = round(raw * spec["scale"], 4)
-        s["dates"].append(month)
-        s["values"].append(value)
-        s["prev"] = s["latest"]
-        s["latest"] = value
-        s["latestDate"] = month
+        if fred_latest and month < fred_latest:
+            # Older than what FRED already has — ignore.
+            print(f"  fresh point {key} skipped: {month} older than FRED's {fred_latest}", file=sys.stderr)
+            continue
+        elif fred_latest and month == fred_latest:
+            # Same month FRED already has: replace it in place with the
+            # news value and mark provisional (covers prelim-vs-final and the
+            # case where FRED's copy is artificially delayed to this month).
+            s["values"][-1] = value
+            s["prev"] = s["values"][-2] if len(s["values"]) > 1 else value
+            s["latest"] = value
+            s["latestDate"] = month
+            print(f"  fresh point {key}: replaced {month} in place -> {value}")
+        else:
+            # Strictly newer than FRED — append.
+            s["dates"].append(month)
+            s["values"].append(value)
+            s["prev"] = s["latest"]
+            s["latest"] = value
+            s["latestDate"] = month
+            print(f"  fresh point {key}: appended {month} -> {value}")
         s["provisionalLast"] = True
         s["provisionalKind"] = fp.get("kind", "prelim")
-        # Refresh trailing-range stats to include the new point.
         vals = s["values"]
         s["min5y"], s["max5y"] = round(min(vals), 4), round(max(vals), 4)
         applied += 1
-        print(f"  appended provisional {key}: {value} ({month}, {s['provisionalKind']})")
     return applied
 
 
