@@ -477,14 +477,14 @@ Do the following, using web search where needed (max 5 searches):
 6. Write a one-line macro-regime summary (a phase label plus a short clause), e.g. "Late-cycle — tight spreads, cooling labor, sticky core inflation."
 7. LATEST DELAYED RELEASES — this is important, be precise. Some official series publish to FRED on a delay, so our stored data is one or more months behind. Here is exactly how far our data currently goes for each:
 {fred_status}
-For each series below, search the web for the SINGLE MOST RECENT published reading available as of {today}, and return it ONLY IF it is for a MONTH NEWER than what we already have above (a later calendar month; a preliminary reading counts). If the newest available reading is the same month we already have, OMIT that series — do NOT return an older or equal month just to fill it in. Report the exact reference month (YYYY-MM) the reading is FOR, not its release date. Values to find:
-   - "umich" = University of Michigan Consumer Sentiment headline index (roughly 40-110). Its preliminary reading for the current month is released mid-month — return that.
+For each series below, search the web and return an ARRAY of ALL published monthly readings for months NEWER than what we already have above, in chronological order, up to and including the most recent (a preliminary reading counts). For example, if our data goes through 2026-05 and both June and July have since been reported, return BOTH: [{{"value":..,"month":"2026-06","kind":"final"}},{{"value":..,"month":"2026-07","kind":"prelim"}}] — do not skip June. This keeps month-over-month changes correct. If nothing newer than our latest month has been published, return an empty array or omit the series. Report each reading's exact reference month (YYYY-MM), not its release date. Values to find:
+   - "umich" = University of Michigan Consumer Sentiment headline index (roughly 40-110). Its preliminary reading for the current month releases mid-month.
    - "existingHome" = US existing home sales, millions SAAR (roughly 3.0-6.5)
    - "pceHeadline" = headline PCE inflation, YoY % (e.g. 3.4)
    - "pceCore" = core PCE inflation, YoY % (e.g. 3.1)
    - "saving" = US personal saving rate, % (e.g. 4.5)
    - "retailYoY" = US retail & food services sales EX motor vehicles, YoY % (e.g. 4.2). Report year-over-year percent, not month-over-month.
-   - "ismMfg" = ISM Manufacturing PMI headline (roughly 40-65). Not on FRED at all, so always return the latest you can find.
+   - "ismMfg" = ISM Manufacturing PMI headline (roughly 40-65). Not on FRED at all, so return recent months up to the latest available.
 
 Respond with ONLY this JSON (no markdown fences, no other text). Ensure it is strictly valid JSON: double-quote all keys and string values, no trailing commas, no comments, and escape any double quotes that appear inside string values:
 {{"takeaways":[{{"tag":"Energy","text":"..."}}],
@@ -493,7 +493,7 @@ Respond with ONLY this JSON (no markdown fences, no other text). Ensure it is st
 "consensus":{{"CPI":"3.4% YoY exp","Payrolls":"+80K exp"}},
 "surprises":[{{"label":"CPI","actual":"3.5%","consensus":"3.4%","dir":"up"}}],
 "regime":{{"label":"Late-cycle","detail":"tight spreads, cooling labor, sticky core inflation"}},
-"freshPoints":{{"umich":{{"value":51.2,"month":"2026-07","kind":"prelim"}},"pceHeadline":{{"value":4.1,"month":"2026-06","kind":"final"}},"pceCore":{{"value":3.4,"month":"2026-06","kind":"final"}},"saving":{{"value":4.2,"month":"2026-06","kind":"final"}},"retailYoY":{{"value":4.5,"month":"2026-06","kind":"final"}},"ismMfg":{{"value":49.0,"month":"2026-07","kind":"final"}}}}}}"""
+"freshPoints":{{"umich":[{{"value":52.7,"month":"2026-06","kind":"final"}},{{"value":55.1,"month":"2026-07","kind":"prelim"}}],"pceHeadline":[{{"value":4.1,"month":"2026-06","kind":"final"}}],"pceCore":[{{"value":3.4,"month":"2026-06","kind":"final"}}],"saving":[{{"value":4.2,"month":"2026-06","kind":"final"}}],"retailYoY":[{{"value":4.5,"month":"2026-06","kind":"final"}}],"ismMfg":[{{"value":49.0,"month":"2026-07","kind":"final"}}]}}}}"""
 
 
 def _repair_json(s):
@@ -658,64 +658,75 @@ def _norm_month(s):
 
 
 def apply_fresh_points(series, fresh):
-    """Append a validated, news-sourced latest point to delayed FRED series.
+    """Merge news-sourced recent readings into delayed FRED series.
 
-    Runs from clean FRED data each time (fetch_data rewrites series before
-    this), so points never compound. The appended point is flagged
-    provisional so the frontend can mark it distinctly.
+    Each series' fresh entry may be a single point {value, month, kind} OR a
+    list of the last few points. Any month newer than FRED's latest is
+    appended in chronological order (filling gaps, e.g. FRED has May and the
+    news gives June + July prelim), and a same-month value replaces FRED's in
+    place. This keeps month-over-month deltas correct rather than jumping a
+    month. Runs from clean FRED data each time, so nothing compounds.
     """
     if not isinstance(fresh, dict):
         print("  freshPoints: none returned by the model", file=sys.stderr)
         return 0
     applied = 0
     for key, spec in FRESH_POINT_SPEC.items():
-        fp = fresh.get(key)
-        if not fp:
-            continue  # model didn't return this one; that's fine
+        entry = fresh.get(key)
+        if not entry:
+            continue
         s = series.get(key)
         if not s or "values" not in s or "dates" not in s:
             print(f"  fresh point {key} skipped: base FRED series not present this run", file=sys.stderr)
             continue
-        try:
-            raw = float(fp.get("value"))
-        except (TypeError, ValueError):
-            print(f"  fresh point {key} skipped: non-numeric value {fp.get('value')!r}", file=sys.stderr)
+
+        # Normalize to a list of points.
+        points = entry if isinstance(entry, list) else [entry]
+        # Clean, validate, and sort chronologically.
+        cleaned = []
+        last_kind = "prelim"
+        for fp in points:
+            if not isinstance(fp, dict):
+                continue
+            try:
+                raw = float(fp.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if not (spec["lo"] <= raw <= spec["hi"]):
+                print(f"  fresh point {key} rejected: {raw} out of range [{spec['lo']},{spec['hi']}]", file=sys.stderr)
+                continue
+            month = _norm_month(fp.get("month") or fp.get("date") or "")
+            if not month:
+                continue
+            cleaned.append((month, round(raw * spec["scale"], 4), fp.get("kind", "prelim")))
+        if not cleaned:
             continue
-        if not (spec["lo"] <= raw <= spec["hi"]):
-            print(f"  fresh point {key} rejected: {raw} out of range [{spec['lo']},{spec['hi']}]", file=sys.stderr)
-            continue
-        month = _norm_month(fp.get("month") or fp.get("date") or "")
-        if not month:
-            print(f"  fresh point {key} skipped: unparseable month {fp.get('month') or fp.get('date')!r}", file=sys.stderr)
-            continue
-        fred_latest = s["dates"][-1] if s["dates"] else None
-        value = round(raw * spec["scale"], 4)
-        if fred_latest and month < fred_latest:
-            # Older than what FRED already has — ignore.
-            print(f"  fresh point {key} skipped: {month} older than FRED's {fred_latest}", file=sys.stderr)
-            continue
-        elif fred_latest and month == fred_latest:
-            # Same month FRED already has: replace it in place with the
-            # news value and mark provisional (covers prelim-vs-final and the
-            # case where FRED's copy is artificially delayed to this month).
-            s["values"][-1] = value
-            s["prev"] = s["values"][-2] if len(s["values"]) > 1 else value
-            s["latest"] = value
-            s["latestDate"] = month
-            print(f"  fresh point {key}: replaced {month} in place -> {value}")
-        else:
-            # Strictly newer than FRED — append.
-            s["dates"].append(month)
-            s["values"].append(value)
-            s["prev"] = s["latest"]
-            s["latest"] = value
-            s["latestDate"] = month
-            print(f"  fresh point {key}: appended {month} -> {value}")
-        s["provisionalLast"] = True
-        s["provisionalKind"] = fp.get("kind", "prelim")
-        vals = s["values"]
-        s["min5y"], s["max5y"] = round(min(vals), 4), round(max(vals), 4)
-        applied += 1
+        cleaned.sort(key=lambda x: x[0])
+
+        changed = False
+        for month, value, kind in cleaned:
+            fred_latest = s["dates"][-1] if s["dates"] else None
+            if fred_latest and month < fred_latest:
+                continue  # older than our history; ignore quietly
+            elif fred_latest and month == fred_latest:
+                s["values"][-1] = value
+                print(f"  fresh point {key}: replaced {month} in place -> {value}")
+            else:
+                s["dates"].append(month)
+                s["values"].append(value)
+                print(f"  fresh point {key}: appended {month} -> {value}")
+            last_kind = kind
+            changed = True
+
+        if changed:
+            s["prev"] = s["values"][-2] if len(s["values"]) > 1 else s["values"][-1]
+            s["latest"] = s["values"][-1]
+            s["latestDate"] = s["dates"][-1]
+            s["provisionalLast"] = True
+            s["provisionalKind"] = last_kind
+            vals = s["values"]
+            s["min5y"], s["max5y"] = round(min(vals), 4), round(max(vals), 4)
+            applied += 1
     return applied
 
 
